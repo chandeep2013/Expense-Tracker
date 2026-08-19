@@ -1,0 +1,7 @@
+node_modules/
+gen/
+*.db
+*.sqlite
+.env
+dist/
+test/e2e/__screenshots__/

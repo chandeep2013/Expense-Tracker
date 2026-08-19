@@ -1,0 +1,132 @@
+{
+  "_version": "1.59.0",
+  "sap.app": {
+    "id": "expenseclaim",
+    "type": "application",
+    "i18n": "i18n/i18n.properties",
+    "applicationVersion": {
+      "version": "1.0.0"
+    },
+    "title": "{{appTitle}}",
+    "description": "{{appDescription}}",
+    "dataSources": {
+      "mainService": {
+        "uri": "/odata/v4/travel/",
+        "type": "OData",
+        "settings": {
+          "annotations": [],
+          "odataVersion": "4.0"
+        }
+      }
+    },
+    "crossNavigation": {
+      "inbounds": {
+        "expenseclaim-inbound": {
+          "semanticObject": "ExpenseClaims",
+          "action": "manage",
+          "title": "{{appTitle}}",
+          "info": "{{appDescription}}",
+          "signature": {
+            "parameters": {},
+            "additionalParameters": "allowed"
+          }
+        }
+      }
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "icons": {},
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.ui5": {
+    "flexEnabled": false,
+    "dependencies": {
+      "minUI5Version": "1.120.0",
+      "libs": {
+        "sap.m": {},
+        "sap.ui.core": {},
+        "sap.fe.templates": {}
+      }
+    },
+    "models": {
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": {
+          "bundleName": "expenseclaim.i18n.i18n"
+        }
+      },
+      "": {
+        "dataSource": "mainService",
+        "preload": true,
+        "settings": {
+          "operationMode": "Server",
+          "autoExpandSelect": true,
+          "earlyRequests": true
+        }
+      }
+    },
+    "resources": {
+      "css": []
+    },
+    "routing": {
+      "config": {},
+      "routes": [
+        {
+          "pattern": ":?query:",
+          "name": "ExpenseClaimsList",
+          "target": "ExpenseClaimsList"
+        },
+        {
+          "pattern": "ExpenseClaims({key}):?query:",
+          "name": "ExpenseClaimsObjectPage",
+          "target": "ExpenseClaimsObjectPage"
+        }
+      ],
+      "targets": {
+        "ExpenseClaimsList": {
+          "type": "Component",
+          "id": "ExpenseClaimsList",
+          "name": "sap.fe.templates.ListReport",
+          "options": {
+            "settings": {
+              "entitySet": "ExpenseClaims",
+              "variantManagement": "None",
+              "initialLoad": "Enabled",
+              "navigation": {
+                "ExpenseClaims": {
+                  "detail": {
+                    "route": "ExpenseClaimsObjectPage"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ExpenseClaimsObjectPage": {
+          "type": "Component",
+          "id": "ExpenseClaimsObjectPage",
+          "name": "sap.fe.templates.ObjectPage",
+          "options": {
+            "settings": {
+              "entitySet": "ExpenseClaims",
+              "editableHeaderContent": false
+            }
+          }
+        }
+      }
+    },
+    "contentDensities": {
+      "compact": true,
+      "cozy": true
+    }
+  },
+  "sap.fiori": {
+    "registrationIds": [],
+    "archeType": "transactional"
+  }
+}
