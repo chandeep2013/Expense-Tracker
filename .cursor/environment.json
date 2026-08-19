@@ -1,0 +1,20 @@
+{
+  "name": "Expense Tracker",
+  "install": "npm install",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "npm run dev:server",
+      "description": "Express + SQLite REST API on port 3001 (auto-reloads via tsx watch)."
+    },
+    {
+      "name": "web",
+      "command": "npm run dev:client",
+      "description": "React + Vite dev server on port 5173 (proxies /api to the API)."
+    }
+  ],
+  "ports": [
+    { "name": "api", "port": 3001 },
+    { "name": "web", "port": 5173 }
+  ]
+}
