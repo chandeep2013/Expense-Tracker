@@ -1,65 +1,82 @@
 # Expense-Tracker
 
-A small full-stack expense tracker: an **Express + SQLite** REST API and a
-**React + Vite** web client, managed as an npm workspaces monorepo.
+Reads your **Gmail** — the Inbox plus the `UPI` and `Credit card` labels —
+extracts each transaction from the alert emails, and **groups your spending by
+expense type** (Snacks & Food, Credit Card Bill, Loan & EMI, Shopping,
+Transport, Bills & Utilities, and more).
 
-## Stack
+An **Express** API does the Gmail read + parse + categorize; a **React + Vite**
+dashboard shows the grouped totals. It's an npm workspaces monorepo.
 
-| Layer  | Tech                                            | Port |
-| ------ | ----------------------------------------------- | ---- |
-| API    | Node + Express 5, `better-sqlite3` (SQLite file) | 3001 |
-| Client | React 19 + Vite (TypeScript)                     | 5173 |
+| Layer  | Tech                                     | Port |
+| ------ | ---------------------------------------- | ---- |
+| API    | Node + Express 5, `googleapis` (Gmail)   | 3001 |
+| Client | React 19 + Vite (TypeScript)             | 5173 |
 
-The SQLite schema is created automatically on first run and seeded with a few
-example expenses, so the app works end-to-end on a fresh checkout with no
-separate migration step. The database file lives at `server/data/expenses.sqlite`
-(git-ignored).
+## How it works
 
-## Getting started
-
-```bash
-npm install        # installs all workspaces
-npm run dev        # runs API (:3001) and client (:5173) together
+```
+Gmail (Inbox + UPI + Credit card labels)
+        │  googleapis
+        ▼
+   parse  → amount, merchant, date, debit/credit, account
+        ▼
+ categorize → Snacks & Food / Credit Card Bill / Loan & EMI / …
+        ▼
+   group by expense type  →  /api/groups, /api/summary  →  dashboard
 ```
 
-Then open http://localhost:5173.
+- Parsing lives in `server/src/parse.ts` (handles Indian bank UPI + credit-card alert formats).
+- Categorization rules live in `server/src/categorize.ts` — edit the keyword lists to tune categories.
 
-To run the services separately:
+## Running it
 
 ```bash
-npm run dev:server   # API only, on :3001
-npm run dev:client   # client only, on :5173
+npm install
+npm run dev        # API (:3001) + dashboard (:5173)
 ```
+
+Open http://localhost:5173.
+
+Without Google credentials the app runs in **sample mode** against realistic
+fixture emails (`server/src/fixtures.ts`), so the full pipeline is demonstrable
+offline. Provide credentials to read your real inbox.
+
+### Connect your Gmail (live mode)
+
+Set these environment variables (e.g. as Cursor Secrets) and restart the API:
+
+| Variable                | Purpose                                  |
+| ----------------------- | ---------------------------------------- |
+| `GOOGLE_CLIENT_ID`      | OAuth 2.0 client ID (Google Cloud)       |
+| `GOOGLE_CLIENT_SECRET`  | OAuth 2.0 client secret                  |
+| `GOOGLE_REFRESH_TOKEN`  | Refresh token with `gmail.readonly` scope |
+| `GMAIL_LABELS`          | Optional, default `UPI,Credit card`      |
+
+Create an OAuth client in the Google Cloud console, enable the Gmail API, and
+authorize the `https://www.googleapis.com/auth/gmail.readonly` scope to obtain a
+refresh token.
 
 ## API
 
-| Method   | Route                | Description                          |
-| -------- | -------------------- | ------------------------------------ |
-| `GET`    | `/api/health`        | Liveness check + available categories |
-| `GET`    | `/api/expenses`      | List expenses (newest first)          |
-| `POST`   | `/api/expenses`      | Create an expense                     |
-| `DELETE` | `/api/expenses/:id`  | Delete an expense                     |
-| `GET`    | `/api/summary`       | Totals and per-category breakdown     |
-
-Example:
-
-```bash
-curl -s http://localhost:3001/api/expenses
-curl -s -X POST http://localhost:3001/api/expenses \
-  -H 'content-type: application/json' \
-  -d '{"description":"Coffee","amount":4.75,"category":"Food","spent_on":"2026-08-19"}'
-```
+| Method | Route                | Description                                   |
+| ------ | -------------------- | --------------------------------------------- |
+| `GET`  | `/api/auth/status`   | Live vs sample mode, labels, last error       |
+| `GET`  | `/api/expenses`      | All parsed + categorized transactions         |
+| `GET`  | `/api/groups`        | Transactions grouped by expense type (spend)  |
+| `GET`  | `/api/summary`       | Totals by type and by source (UPI/CC/Inbox)   |
+| `POST` | `/api/refresh`       | Re-read Gmail and rebuild the cache           |
 
 ## Scripts
 
-| Command             | What it does                                    |
-| ------------------- | ----------------------------------------------- |
-| `npm run dev`       | Run API + client together (via `concurrently`)  |
-| `npm run build`     | Type-check + build the client and compile the API |
-| `npm test`          | Run the API integration tests (`node --test`)   |
+| Command         | What it does                              |
+| --------------- | ----------------------------------------- |
+| `npm run dev`   | Run API + dashboard together              |
+| `npm run build` | Type-check + build client, compile API    |
+| `npm test`      | Parser, categorizer, and pipeline tests   |
 
 ## Cloud Agent environment
 
-`.cursor/environment.json` configures the Cursor Cloud Agent environment:
-`npm install` runs on setup, and two terminals (`api`, `web`) start the dev
-servers. Ports 3001 and 5173 are exposed.
+`.cursor/environment.json` runs `npm install` on setup and starts the `api` and
+`web` dev servers; ports 3001 and 5173 are exposed. Google credentials are read
+from the environment, never committed.

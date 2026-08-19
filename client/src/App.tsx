@@ -1,202 +1,163 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { api, CATEGORIES, type Expense, type Summary } from "./api.js";
+import { useEffect, useMemo, useState } from "react";
+import {
+  api,
+  type AuthStatus,
+  type CategoryGroup,
+  type Summary,
+  type Transaction,
+} from "./api.js";
 
-const currency = new Intl.NumberFormat("en-US", {
+const inr = new Intl.NumberFormat("en-IN", {
   style: "currency",
-  currency: "USD",
+  currency: "INR",
+  maximumFractionDigits: 2,
 });
 
-const today = () => new Date().toISOString().slice(0, 10);
+const CATEGORY_ICON: Record<string, string> = {
+  "Snacks & Food": "🍔",
+  Groceries: "🛒",
+  "Credit Card Bill": "💳",
+  "Loan & EMI": "🏦",
+  Transport: "🚕",
+  Shopping: "🛍️",
+  "Bills & Utilities": "💡",
+  Entertainment: "🎬",
+  Transfers: "🔁",
+  Income: "💰",
+  Other: "📦",
+};
+
+const SOURCE_TAG: Record<string, string> = {
+  UPI: "upi",
+  "Credit Card": "cc",
+  Inbox: "inbox",
+};
 
 export default function App() {
-  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [status, setStatus] = useState<AuthStatus | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [groups, setGroups] = useState<CategoryGroup[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
 
-  const [description, setDescription] = useState("");
-  const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState<string>("Food");
-  const [spentOn, setSpentOn] = useState(today());
-
-  async function refresh() {
-    const [list, sum] = await Promise.all([api.listExpenses(), api.summary()]);
-    setExpenses(list);
+  async function load() {
+    const [s, sum, grp] = await Promise.all([api.status(), api.summary(), api.groups()]);
+    setStatus(s);
     setSummary(sum);
+    setGroups(grp);
+    setOpen((prev) => prev ?? grp[0]?.category ?? null);
   }
 
   useEffect(() => {
-    refresh()
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Failed to load data"))
+    load()
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoading(false));
   }, []);
 
-  const maxCategoryTotal = useMemo(
-    () => summary?.byCategory.reduce((m, c) => Math.max(m, c.total), 0) ?? 0,
-    [summary]
-  );
-
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
+  async function handleRefresh() {
+    setRefreshing(true);
     setError(null);
-    setSaving(true);
     try {
-      await api.createExpense({
-        description,
-        amount: Number(amount),
-        category,
-        spent_on: spentOn,
-      });
-      setDescription("");
-      setAmount("");
-      setSpentOn(today());
-      await refresh();
+      await api.refresh();
+      await load();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to add expense");
+      setError(e instanceof Error ? e.message : "Refresh failed");
     } finally {
-      setSaving(false);
+      setRefreshing(false);
     }
   }
 
-  async function handleDelete(id: number) {
-    setError(null);
-    try {
-      await api.deleteExpense(id);
-      await refresh();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to delete expense");
-    }
-  }
+  const maxTotal = useMemo(
+    () => groups.reduce((m, g) => Math.max(m, g.total), 0),
+    [groups]
+  );
 
   return (
     <div className="page">
       <header className="hero">
-        <h1>Expense Tracker</h1>
-        <p>Track where your money goes, one expense at a time.</p>
+        <div>
+          <h1>Expense Tracker</h1>
+          <p>Your spending from Gmail — UPI &amp; Credit&nbsp;card alerts, grouped by type.</p>
+        </div>
+        <button className="refresh" onClick={handleRefresh} disabled={refreshing}>
+          {refreshing ? "Refreshing…" : "↻ Refresh"}
+        </button>
       </header>
 
-      <section className="stats">
-        <div className="stat-card total">
-          <span className="stat-label">Total spent</span>
-          <span className="stat-value">
-            {summary ? currency.format(summary.total) : "—"}
+      {status && (
+        <div className={`banner ${status.mode}`}>
+          <span className="dot" />
+          <span>
+            <strong>{status.mode === "live" ? "Connected to Gmail" : "Sample data"}</strong> —{" "}
+            {status.message} Labels: {status.labels.join(", ")}.
           </span>
         </div>
+      )}
+
+      <section className="stats">
+        <div className="stat-card spent">
+          <span className="stat-label">Total spent</span>
+          <span className="stat-value">{summary ? inr.format(summary.totalSpent) : "—"}</span>
+        </div>
         <div className="stat-card">
-          <span className="stat-label">Expenses</span>
-          <span className="stat-value">{summary ? summary.count : "—"}</span>
+          <span className="stat-label">Received</span>
+          <span className="stat-value">{summary ? inr.format(summary.totalReceived) : "—"}</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Transactions</span>
+          <span className="stat-value">{summary ? summary.transactionCount : "—"}</span>
         </div>
         <div className="stat-card">
           <span className="stat-label">Categories</span>
-          <span className="stat-value">{summary ? summary.byCategory.length : "—"}</span>
+          <span className="stat-value">{groups.length || "—"}</span>
         </div>
       </section>
 
-      <div className="layout">
-        <section className="panel">
-          <h2>Add expense</h2>
-          <form onSubmit={handleSubmit} className="form">
-            <label>
-              Description
-              <input
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="e.g. Lunch with team"
-                required
-              />
-            </label>
-            <div className="form-row">
-              <label>
-                Amount
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  placeholder="0.00"
-                  required
-                />
-              </label>
-              <label>
-                Date
-                <input
-                  type="date"
-                  value={spentOn}
-                  onChange={(e) => setSpentOn(e.target.value)}
-                  required
-                />
-              </label>
-            </div>
-            <label>
-              Category
-              <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="submit" disabled={saving}>
-              {saving ? "Adding…" : "Add expense"}
-            </button>
-          </form>
+      {error && <p className="error" role="alert">{error}</p>}
 
-          {summary && summary.byCategory.length > 0 && (
-            <div className="breakdown">
-              <h3>By category</h3>
-              {summary.byCategory.map((c) => (
-                <div key={c.category} className="bar-row">
-                  <span className="bar-label">{c.category}</span>
-                  <span className="bar-track">
-                    <span
-                      className="bar-fill"
-                      style={{
-                        width: `${maxCategoryTotal ? (c.total / maxCategoryTotal) * 100 : 0}%`,
-                      }}
-                    />
-                  </span>
-                  <span className="bar-value">{currency.format(c.total)}</span>
-                </div>
-              ))}
+      {loading ? (
+        <p className="muted">Loading…</p>
+      ) : (
+        <section className="groups">
+          <h2>Spending by type</h2>
+          {groups.map((g) => (
+            <div className="group" key={g.category}>
+              <button
+                className="group-head"
+                onClick={() => setOpen(open === g.category ? null : g.category)}
+                aria-expanded={open === g.category}
+              >
+                <span className="group-icon">{CATEGORY_ICON[g.category] ?? "📦"}</span>
+                <span className="group-name">{g.category}</span>
+                <span className="group-track">
+                  <span
+                    className="group-fill"
+                    style={{ width: `${maxTotal ? (g.total / maxTotal) * 100 : 0}%` }}
+                  />
+                </span>
+                <span className="group-total">{inr.format(g.total)}</span>
+                <span className="group-count">{g.count}</span>
+              </button>
+              {open === g.category && (
+                <ul className="txn-list">
+                  {g.transactions.map((t: Transaction) => (
+                    <li className="txn" key={t.id}>
+                      <span className={`src src-${SOURCE_TAG[t.source] ?? "inbox"}`}>{t.source}</span>
+                      <span className="txn-merchant">{t.merchant}</span>
+                      <span className="txn-account">{t.account}</span>
+                      <span className="txn-date">{t.date}</span>
+                      <span className="txn-amount">{inr.format(t.amount)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
-          )}
+          ))}
+          {groups.length === 0 && <p className="muted">No transactions found.</p>}
         </section>
-
-        <section className="panel">
-          <h2>Recent expenses</h2>
-          {error && <p className="error" role="alert">{error}</p>}
-          {loading ? (
-            <p className="muted">Loading…</p>
-          ) : expenses.length === 0 ? (
-            <p className="muted">No expenses yet. Add your first one!</p>
-          ) : (
-            <ul className="expense-list">
-              {expenses.map((e) => (
-                <li key={e.id} className="expense-item">
-                  <div className="expense-main">
-                    <span className="expense-desc">{e.description}</span>
-                    <span className={`tag tag-${e.category.toLowerCase()}`}>{e.category}</span>
-                  </div>
-                  <div className="expense-meta">
-                    <span className="expense-date">{e.spent_on}</span>
-                    <span className="expense-amount">{currency.format(e.amount)}</span>
-                    <button
-                      className="delete"
-                      aria-label={`Delete ${e.description}`}
-                      onClick={() => handleDelete(e.id)}
-                    >
-                      ×
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      </div>
+      )}
     </div>
   );
 }

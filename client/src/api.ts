@@ -1,61 +1,52 @@
-export interface Expense {
-  id: number;
-  description: string;
+export type Direction = "debit" | "credit";
+export type Source = "UPI" | "Credit Card" | "Inbox";
+
+export interface Transaction {
+  id: string;
+  date: string;
   amount: number;
+  direction: Direction;
+  merchant: string;
+  account: string;
+  source: Source;
   category: string;
-  spent_on: string;
-  created_at: string;
+  subject: string;
+}
+
+export interface CategoryGroup {
+  category: string;
+  total: number;
+  count: number;
+  transactions: Transaction[];
 }
 
 export interface Summary {
-  total: number;
-  count: number;
-  byCategory: { category: string; total: number }[];
+  totalSpent: number;
+  totalReceived: number;
+  transactionCount: number;
+  bySource: { source: Source; total: number; count: number }[];
+  byCategory: { category: string; total: number; count: number }[];
 }
 
-export interface NewExpense {
-  description: string;
-  amount: number;
-  category: string;
-  spent_on: string;
+export interface AuthStatus {
+  mode: "live" | "sample";
+  labels: string[];
+  connected: boolean;
+  lastError: string | null;
+  message: string;
 }
 
 async function json<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    let message = `Request failed (${res.status})`;
-    try {
-      const body = await res.json();
-      if (body?.error) message = body.error;
-    } catch {
-      /* ignore parse errors */
-    }
-    throw new Error(message);
-  }
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
   return res.json() as Promise<T>;
 }
 
 export const api = {
-  listExpenses: () => fetch("/api/expenses").then((r) => json<Expense[]>(r)),
+  status: () => fetch("/api/auth/status").then((r) => json<AuthStatus>(r)),
+  groups: () => fetch("/api/groups").then((r) => json<CategoryGroup[]>(r)),
   summary: () => fetch("/api/summary").then((r) => json<Summary>(r)),
-  createExpense: (input: NewExpense) =>
-    fetch("/api/expenses", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
-    }).then((r) => json<Expense>(r)),
-  deleteExpense: (id: number) =>
-    fetch(`/api/expenses/${id}`, { method: "DELETE" }).then((r) => {
-      if (!r.ok && r.status !== 204) throw new Error(`Delete failed (${r.status})`);
-    }),
+  refresh: () =>
+    fetch("/api/refresh", { method: "POST" }).then((r) =>
+      json<{ refreshed: boolean; count: number }>(r)
+    ),
 };
-
-export const CATEGORIES = [
-  "Food",
-  "Transport",
-  "Housing",
-  "Utilities",
-  "Entertainment",
-  "Health",
-  "Shopping",
-  "Other",
-] as const;
