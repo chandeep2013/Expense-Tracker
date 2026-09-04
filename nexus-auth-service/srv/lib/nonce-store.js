@@ -1,0 +1,153 @@
+"use strict";
+
+/**
+ * In-memory nonce store with TTL.
+ *
+ * Maps nonce → { user, createdAt, status, hash }
+ *
+ * Lifecycle:
+ *   1. license-service.js calls create(userId) → returns a nonce string.
+ *   2. Nexus POSTs to /nexus/callback?n=<nonce> with the hash.
+ *      callback-service.js calls complete(nonce, hash) → marks it done.
+ *   3. Fiori client polls GET /api/license/result(nonce='...').
+ *      license-service.js calls get(nonce) and returns status/hash.
+ *   4. After TTL_MS the entry expires and is auto-deleted.
+ *
+ * IMPORTANT: This is intentionally in-memory.
+ *   - Safe for a SINGLE CF instance only.
+ *   - mta.yaml must set instances: 1.
+ *   - If you need to scale, replace this module with a Redis-backed
+ *     implementation — the interface (create / complete / get) is unchanged.
+ */
+
+const crypto = require("crypto");
+
+const TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * @type {Map<string, {
+ *   user:      string,
+ *   createdAt: number,
+ *   status:    'pending' | 'complete' | 'failed',
+ *   message:   string,
+ *   token:     string,
+ *   userId:    number|null,
+ *   restEndPoint: string,
+ *   jwt:       string
+ * }>}
+ */
+const store = new Map();
+
+/**
+ * Create a new nonce for userId. Returns the nonce string.
+ * @param {string} user
+ * @returns {string}
+ */
+function create(user) {
+  const nonce = crypto.randomBytes(24).toString("base64url");
+  store.set(nonce, { user, createdAt: Date.now(), status: "pending", message: "", token: "", userId: null, restEndPoint: "", jwt: "" });
+  return nonce;
+}
+
+/**
+ * Mark a nonce as complete with the Nexus callback payload.
+ * Returns true on success, false if nonce not found or expired.
+ * @param {string} nonce
+ * @param {{ token: string, userId?: number, restEndPoint?: string, jwt?: string }} nexusData
+ * @returns {boolean}
+ */
+function complete(nonce, nexusData) {
+  const entry = store.get(nonce);
+  if (!entry || Date.now() - entry.createdAt > TTL_MS) {
+    store.delete(nonce);
+    return false;
+  }
+  entry.token       = nexusData.token       || "";
+  entry.userId      = nexusData.userId      ?? null;
+  entry.restEndPoint = nexusData.restEndPoint || "";
+  entry.jwt         = nexusData.jwt         || "";
+  entry.status = "complete";
+  return true;
+}
+
+/**
+ * Mark a nonce as complete by user identity (for when Nexus strips the nonce
+ * from the postBack URL and we must correlate via the JWT in the callback body).
+ * Matches the oldest pending nonce for the given user (case-insensitive).
+ * Returns the matched nonce string on success, null if not found.
+ * @param {string} user  — XSUAA / UPN user identifier
+ * @param {{ token: string, userId?: number, restEndPoint?: string, jwt?: string }} nexusData
+ * @returns {string|null}
+ */
+function completeByUser(user, nexusData) {
+  const normalizedUser = (user || "").toLowerCase();
+  let   oldest         = null;
+  let   oldestNonce    = null;
+
+  for (const [nonce, entry] of store.entries()) {
+    if (entry.status !== "pending") continue;
+    if (entry.user.toLowerCase() !== normalizedUser) continue;
+    if (Date.now() - entry.createdAt > TTL_MS) { store.delete(nonce); continue; }
+    if (!oldest || entry.createdAt < oldest.createdAt) {
+      oldest      = entry;
+      oldestNonce = nonce;
+    }
+  }
+
+  if (!oldest) return null;
+
+  oldest.token       = nexusData.token       || "";
+  oldest.userId      = nexusData.userId      ?? null;
+  oldest.restEndPoint = nexusData.restEndPoint || "";
+  oldest.jwt         = nexusData.jwt         || "";
+  oldest.status      = "complete";
+  return oldestNonce;
+}
+
+/**
+ * Mark a nonce as failed when the outbound Nexus /requestHash call errors.
+ * Returns true on success, false if nonce not found or expired.
+ * @param {string} nonce
+ * @param {string} message
+ * @returns {boolean}
+ */
+function fail(nonce, message) {
+  const entry = store.get(nonce);
+  if (!entry || Date.now() - entry.createdAt > TTL_MS) {
+    store.delete(nonce);
+    return false;
+  }
+  if (entry.status === "complete") {
+    return false;
+  }
+  entry.status  = "failed";
+  entry.message = message || "Nexus requestHash failed";
+  return true;
+}
+
+/**
+ * Retrieve a nonce entry, or null if not found / expired.
+ * @param {string} nonce
+ * @returns {{ user: string, status: string, message: string, token: string, userId: number|null, restEndPoint: string, jwt: string } | null}
+ */
+function get(nonce) {
+  const entry = store.get(nonce);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > TTL_MS) {
+    store.delete(nonce);
+    return null;
+  }
+  return entry;
+}
+
+// Periodic cleanup: remove entries older than TTL_MS.
+// .unref() lets the process exit cleanly even if this interval is pending.
+setInterval(() => {
+  const cutoff = Date.now() - TTL_MS;
+  for (const [k, v] of store) {
+    if (v.createdAt < cutoff) store.delete(k);
+  }
+}, 60_000).unref();
+
+module.exports = { create, complete, completeByUser, fail, get };
+
