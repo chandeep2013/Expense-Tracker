@@ -3,11 +3,11 @@
   "authenticationMethod": "route",
   "routes": [
     {
-      "source": "^/api/",
+      "source": "^/api/(.*)$",
+      "target": "/api/$1",
       "destination": "NexusAuth",
       "authenticationType": "xsuaa",
-      "csrfProtection": false,
-      "timeout": 120000
+      "csrfProtection": false
     },
     {
       "source": "^/nexus",
@@ -43,13 +43,6 @@
       "source": "^/web",
       "destination": "NexusQA",
       "authenticationType": "none",
-      "csrfProtection": false
-    },
-    {
-      "source": "^<apply-service-segment-path>/(.*)$",
-      "target": "<apply-service-segment-path>/$1",
-      "destination": "NexusQA",
-      "authenticationType": "xsuaa",
       "csrfProtection": false
     },
     {

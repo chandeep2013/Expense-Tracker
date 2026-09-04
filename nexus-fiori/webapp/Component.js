@@ -1,13 +1,16 @@
 sap.ui.define([
     "sap/ui/core/UIComponent",
-    "com/nexus/asset/model/models",
-    'sap/ui/model/json/JSONModel',
-    'sap/f/library',
+    "sap/ui/model/json/JSONModel",
+    "sap/ui/core/mvc/XMLView",
+    "sap/ui/core/EventBus",
     "sap/base/util/UriParameters",
+    "sap/f/library",
     "sap/f/FlexibleColumnLayoutSemanticHelper"
-], (UIComponent, models, JSONModel, fioriLibrary, UriParameters, FlexibleColumnLayoutSemanticHelper) => {
+], function (UIComponent, JSONModel, XMLView, EventBus, UriParameters, fioriLibrary, FlexibleColumnLayoutSemanticHelper) {
     "use strict";
-var LayoutType = fioriLibrary.LayoutType;
+
+    var LayoutType = fioriLibrary.LayoutType;
+
     return UIComponent.extend("com.nexus.asset.Component", {
         metadata: {
             manifest: "json",
@@ -15,60 +18,57 @@ var LayoutType = fioriLibrary.LayoutType;
                 "sap.ui.core.IAsyncContentCreation"
             ]
         },
+
+        /**
+         * IAsyncContentCreation requires createContent to return a Promise.
+         */
         createContent: function () {
-            var view = sap.ui.view({
+            return XMLView.create({
                 id: "idAppView",
                 viewName: "com.nexus.asset.view.App",
-                type: sap.ui.core.mvc.ViewType.XML,
                 viewData: {
                     component: this
                 }
+            }).then(function (view) {
+                view.setBusyIndicatorDelay(0);
+                view.setBusy(true);
+                window.appView = view;
+                return view;
             });
-
-            view.setBusyIndicatorDelay(0);
-            view.setBusy(true);
-            window.appView = view;
-            return view;
         },
 
-        init() {
-            var oModel,
-            oRouter;
-            // call the base component's init function
+        init: function () {
             UIComponent.prototype.init.apply(this, arguments);
-            
-            oModel = new JSONModel();
-            this.setModel(oModel);
-            // enable routing
-            oRouter = this.getRouter();
+
+            this.setModel(new JSONModel());
+
+            var oRouter = this.getRouter();
             oRouter.attachBeforeRouteMatched(this._onBeforeRouteMatched, this);
             oRouter.initialize();
 
-
-            //this.setModel(models.createLocalModel(), "LocalDataModel");
-
-            sap.ui.getCore().getEventBus().publish("app", "initEvents");
+            EventBus.getInstance().publish("app", "initEvents");
         },
-        _onBeforeRouteMatched: function(oEvent) {
-            var oModel = this.getModel(),
-                sLayout = oEvent.getParameters().arguments.layout;
 
-            // If there is no layout parameter, use semantic helper default layout
+        _onBeforeRouteMatched: function (oEvent) {
+            var oModel = this.getModel();
+            var sLayout = oEvent.getParameters().arguments.layout;
+
             if (!sLayout) {
                 sLayout = this.getHelper().getNextUIState(0).layout;
             }
 
             oModel.setProperty("/layout", sLayout);
         },
+
         getHelper: function () {
-            var oFCL = this.getRootControl().byId('flexibleColumnLayout'),
-                oParams = UriParameters.fromQuery(location.search),
-                oSettings = {
-                    defaultTwoColumnLayoutType: LayoutType.TwoColumnsMidExpanded,
-                    defaultThreeColumnLayoutType: LayoutType.ThreeColumnsMidExpanded,
-                    mode: oParams.get("mode"),
-                    maxColumnsCount: oParams.get("max")
-                };
+            var oFCL = this.getRootControl().byId("flexibleColumnLayout");
+            var oParams = UriParameters.fromQuery(window.location.search);
+            var oSettings = {
+                defaultTwoColumnLayoutType: LayoutType.TwoColumnsMidExpanded,
+                defaultThreeColumnLayoutType: LayoutType.ThreeColumnsMidExpanded,
+                mode: oParams.get("mode"),
+                maxColumnsCount: oParams.get("max")
+            };
 
             return FlexibleColumnLayoutSemanticHelper.getInstanceFor(oFCL, oSettings);
         }

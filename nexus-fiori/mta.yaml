@@ -73,11 +73,9 @@ resources:
             URL: https://ui5.sap.com
           existing_destinations_policy: update
       version: 1.0.0
-    # Managed HTML5 runtime uses additional property HTML5.Timeout (ms),
-    # not "timeout". Default is 30000 and causes 504 gateway errors when
-    # /api/license/requestHash waits on Nexus. Set HTML5.Timeout=120000
-    # on the NexusAuth destination in BTP Cockpit (xs-app.json route
-    # timeout is 120000 as well).
+    # Managed HTML5 runtime ignores destination "timeout" and does not
+    # support route-level timeout in xs-app.json (that can 500 Component.js).
+    # Set additional property HTML5.Timeout=120000 on destination NexusAuth.
     service: destination
     service-name: comnexusasset-destination-service
     service-plan: lite

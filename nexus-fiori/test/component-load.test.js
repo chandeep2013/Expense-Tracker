@@ -39,4 +39,11 @@ describe("Component.js loads as a UI5 module", () => {
     );
     assert.equal(src.includes("oStorage"), false);
   });
+
+  it("uses XMLView.create instead of removed sap.ui.view factory", () => {
+    const src = fs.readFileSync(path.join(__dirname, "../webapp/Component.js"), "utf8");
+    assert.match(src, /XMLView\.create\(/);
+    assert.equal(/\bsap\.ui\.view\s*\(/.test(src), false);
+    assert.equal(src.includes("jQuery.sap"), false);
+  });
 });
