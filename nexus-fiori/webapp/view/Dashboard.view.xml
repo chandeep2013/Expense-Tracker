@@ -1,0 +1,22 @@
+<mvc:View xmlns:core="sap.ui.core" xmlns:mvc="sap.ui.core.mvc" xmlns="sap.m" controllerName="com.nexus.asset.controller.Dashboard" xmlns:html="http://www.w3.org/1999/xhtml">
+    <App>
+        <pages>
+            <Page id="idPage" title="Dashboard" class="sapUiSizeCompact" enableScrolling="true" showHeader="false">
+                <content>
+                    <VBox class="assetDashboardContainer sapUiResponsiveContentPadding">
+                        <Title text="Applications" level="H3" class="sapUiSmallMarginBottom" />
+                        <GenericTile
+                            header="Asset Hierarchy"
+                            subheader="Open asset structure"
+                            class="assetLaunchTile"
+                            press="onPressAssetHierarchyTile">
+                            <TileContent>
+                                <ImageContent src="sap-icon://tree" />
+                            </TileContent>
+                        </GenericTile>
+                    </VBox>
+                </content>
+            </Page>
+        </pages>
+    </App>
+</mvc:View>

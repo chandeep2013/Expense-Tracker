@@ -1,0 +1,155 @@
+{
+  "_version": "1.81.0",
+  "sap.app": {
+    "id": "com.nexus.asset",
+    "type": "application",
+    "i18n": "i18n/i18n.properties",
+    "applicationVersion": {
+      "version": "0.0.1"
+    },
+    "title": "{{appTitle}}",
+    "description": "{{appDescription}}",
+    "resources": "resources.json",
+    "sourceTemplate": {
+      "id": "@sap/generator-fiori:basic",
+      "version": "1.20.2",
+      "toolsId": "74969f28-50cc-48a1-a6a7-24623165d9ad"
+    },
+    "crossNavigation": {
+      "inbounds": {
+        "AssetManager-manage": {
+          "semanticObject": "AssetManager",
+          "action": "manage",
+          "title": "Asset Manager",
+          "icon": "sap-icon://tree",
+          "signature": {
+            "parameters": {},
+            "additionalParameters": "allowed"
+          }
+        }
+      }
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "icons": {
+      "icon": "",
+      "favIcon": "",
+      "phone": "",
+      "phone@2": "",
+      "tablet": "",
+      "tablet@2": ""
+    },
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.fiori": {
+    "registrationIds": [],
+    "archeType": "transactional"
+  },
+  "sap.ui5": {
+    "fullWidth": true,
+    "flexEnabled": false,
+    "dependencies": {
+      "minUI5Version": "1.144.1",
+      "libs": {
+        "sap.m": {},
+        "sap.ui.core": {},
+        "sap.ui.layout": {}
+      }
+    },
+    "contentDensities": {
+      "compact": true,
+      "cozy": true
+    },
+    "models": {
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": {
+          "bundleName": "com.nexus.asset.i18n.i18n"
+        }
+      },
+      "LocalDataModel": {
+        "type": "sap.ui.model.json.JSONModel",
+        "settings": {
+          "data": {}
+        }
+      }
+    },
+    "resources": {
+      "css": [
+        {
+          "uri": "css/style.css"
+        }
+      ]
+    },
+    "routing": {
+      "config": {
+        "routerClass": "sap.f.routing.Router",
+        "type": "View",
+        "viewType": "XML",
+        "path": "com.nexus.asset.view",
+        "async": true,
+        "controlId": "flexibleColumnLayout",
+        "transition": "slide"
+      },
+      "routes": [
+        {
+          "name": "Dashboard",
+          "pattern": "Dashboard",
+          "target": [
+            "Dashboard"
+          ]
+        },
+        {
+          "name": "Master",
+          "pattern": ":layout:",
+          "target": [
+            "Master",
+            "Detail"
+          ],
+          "layout": "TwoColumnsMidExpanded"
+        },
+        {
+          "pattern": "Detail/:layout:",
+          "name": "Detail",
+          "target": [
+            "Master",
+            "Detail"
+          ],
+          "layout": "TwoColumnsMidExpanded"
+        }
+      ],
+      "targets": {
+        "Dashboard": {
+          "id": "Dashboard",
+          "name": "Dashboard",
+          "controlAggregation": "beginColumnPages"
+        },
+        "Master": {
+          "viewName": "Master",
+          "viewId": "Master",
+          "controlAggregation": "beginColumnPages"
+        },
+        "Detail": {
+          "viewName": "Detail",
+          "viewId": "Detail",
+          "controlAggregation": "midColumnPages"
+        }
+      }
+    },
+    "rootView": {
+      "viewName": "com.nexus.asset.view.App",
+      "type": "XML",
+      "id": "App",
+      "async": true
+    }
+  },
+  "sap.cloud": {
+    "public": true,
+    "service": "comnexusasset"
+  }
+}

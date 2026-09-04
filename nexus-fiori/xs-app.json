@@ -1,0 +1,74 @@
+{
+  "welcomeFile": "/index.html",
+  "authenticationMethod": "route",
+  "routes": [
+    {
+      "source": "^/api/",
+      "destination": "NexusAuth",
+      "authenticationType": "xsuaa",
+      "csrfProtection": false,
+      "timeout": 120000
+    },
+    {
+      "source": "^/nexus",
+      "destination": "NexusAuth",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/security",
+      "destination": "NexusQA",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/boByKey",
+      "destination": "NexusQA",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/bo",
+      "destination": "NexusQA",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/setting",
+      "destination": "NexusQA",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/web",
+      "destination": "NexusQA",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^<apply-service-segment-path>/(.*)$",
+      "target": "<apply-service-segment-path>/$1",
+      "destination": "NexusQA",
+      "authenticationType": "xsuaa",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/resources/(.*)$",
+      "target": "/resources/$1",
+      "authenticationType": "none",
+      "destination": "ui5"
+    },
+    {
+      "source": "^/test-resources/(.*)$",
+      "target": "/test-resources/$1",
+      "authenticationType": "none",
+      "destination": "ui5"
+    },
+    {
+      "source": "^(.*)$",
+      "target": "$1",
+      "service": "html5-apps-repo-rt",
+      "authenticationType": "xsuaa"
+    }
+  ]
+}

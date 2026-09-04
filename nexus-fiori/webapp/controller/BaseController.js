@@ -1,0 +1,595 @@
+sap.ui.define([
+    "sap/ui/core/mvc/Controller",
+    "sap/ui/core/UIComponent",
+    "sap/m/MessageBox"
+], function (Controller, UIComponent, MessageBox) {
+    "use strict";
+
+    return Controller.extend("com.nexus.asset.controller.BaseController", {
+        onInit: function () {
+            this.getRouter().attachRoutePatternMatched(this.onRouteMatched, this);
+        },
+        displayErrorMessageWithAction: function (errorString, onCloseFunction) {
+            MessageBox.show(
+                errorString, {
+                icon: sap.m.MessageBox.Icon.ERROR,
+                title: "Error",
+                actions: [sap.m.MessageBox.Action.OK],
+                onClose: onCloseFunction,
+                styleClass: "sapUiSizeCompact buttonBlack"
+            }
+            );
+        },
+        displayInfoMessageWithAction: function (infoString, onCloseFunction) {
+
+            MessageBox.show(
+                infoString, {
+                icon: sap.m.MessageBox.Icon.INFORMATION,
+                title: "Information",
+                actions: [sap.m.MessageBox.Action.OK],
+                onClose: onCloseFunction,
+                styleClass: "sapUiSizeCompact buttonBlack"
+            }
+            );
+        },
+        getRouter: function () {
+            return UIComponent.getRouterFor(this);
+        },
+
+        getResourceBundle: function () {
+            var oResourceBundle = this.getOwnerComponent().getModel("i18n")._oResourceBundle;
+            return oResourceBundle;
+        },
+
+        getModel: function (sName) {
+            if (sName) {
+                return this.getOwnerComponent().getModel(sName);
+            } else {
+                return this.getOwnerComponent().getModel();
+            }
+        },
+
+        getLocalDataModel: function () {
+            return this.getOwnerComponent().getModel("LocalDataModel");
+        },
+
+        getApplicationID: function () {
+            return this.getOwnerComponent().getManifestEntry("/sap.app").id.replaceAll(".", "");
+        },
+
+        getApplicationVersion: function () {
+            return this.getOwnerComponent().getManifestEntry("/sap.app").applicationVersion.version;
+        },
+
+        getApplicationRouter: function () {
+            return "/" + this.getOwnerComponent().getManifestEntry("/sap.cloud").service;
+        },
+        getCompleteURL: function () {
+            return this.getApplicationRouter() + "." + this.getApplicationID() + "-" + this.getApplicationVersion();
+        },
+        setBusyOn: function () {
+            window.appView.setBusyIndicatorDelay(0);
+            window.appView.setBusy(true);
+        },
+        setBusyOff: function () {
+            window.appView.setBusy(false);
+        },
+        isRunninglocally: function () {
+            var sHost = window.location.host;
+            if (!sHost.includes("localhost") && !sHost.includes("port"))
+                var Prefix = this.getCompleteURL();
+            else var Prefix = "";
+            return Prefix;
+        },
+
+        /**
+         * Normalize Full_Location property from various casing variants
+         * @param {Object} oNode - Node object
+         * @returns {String} Normalized Full_Location value
+         */
+        _getFullLocation: function(oNode) {
+            if (!oNode) return "";
+            if (oNode.Full_Location) return oNode.Full_Location;
+            if (oNode.Full_location) return oNode.Full_location;
+            if (oNode.full_location) return oNode.full_location;
+            if (oNode.FullLocation) return oNode.FullLocation;
+            return "";
+        },
+
+        /**
+         * Get path segments from a full location string
+         * Splits "Parent / Child / Leaf" into ["Parent", "Child", "Leaf"]
+         * @param {String} sFullLocation - Full location path
+         * @returns {Array} Array of path segments
+         */
+        _getPathSegments: function(sFullLocation) {
+            if (!sFullLocation) {
+                return [];
+            }
+            return sFullLocation.split(" / ");
+        },
+
+        /**
+         * Build breadcrumb array from a full location path
+         * @param {String} sFullLocation - Full location path (e.g., "Parent / Child / Leaf")
+         * @returns {Array} Array of breadcrumb objects {name, fullLocation}
+         */
+        _buildBreadcrumbSegments: function(sFullLocation) {
+            var aBreadcrumb = [];      
+            if (!sFullLocation) {
+                return aBreadcrumb;
+            }           
+            var segments = this._getPathSegments(sFullLocation);          
+            // Use array.slice().join() instead of string concatenation (O(n) vs O(n²))
+            segments.forEach(function(segment, index) {
+                var sFullPath = segments.slice(0, index + 1).join(" / ");
+                aBreadcrumb.push({
+                    name: segment,
+                    fullLocation: sFullPath
+                });
+            });           
+            return aBreadcrumb;
+        },
+
+        fetchSettings: function (hash) {
+            var self = this;
+            var oDeferred = $.Deferred();
+            $.ajax({
+                url: self.isRunninglocally() + "/setting/",
+                method: "GET",
+                dataType: "json",
+                data: {
+                    hash: hash
+                },
+                success: function (response) {
+                    var aRows = Array.isArray(response) ? response : (response && Array.isArray(response.rows) ? response.rows : []);
+                    // Find the AigOrdering row and parse its value JSON
+                    var oOrderingRow = aRows.find(function (r) { return r.identifier === "AigOrdering"; });
+                    if (oOrderingRow && oOrderingRow.value && typeof oOrderingRow.value === "string") {
+                        try {
+                            var aParsed = JSON.parse(oOrderingRow.value);
+                            if (Array.isArray(aParsed)) {
+                                oDeferred.resolve(aParsed);
+                                return;
+                            }
+                        } catch (e) {
+                            console.error("Error parsing AigOrdering value:", e);
+                        }
+                    }
+                    oDeferred.resolve(null);
+                },
+                error: function (xhr, status, error) {
+                    self.setBusyOff();
+                    if (xhr.status === 404) {
+                        console.warn("Settings endpoint not available (404). Using default sorting.", error);
+                    } else {
+                        console.error("Error while fetching settings:", error);
+                    }
+                    oDeferred.resolve(null);
+                }
+            });
+            return oDeferred.promise();
+        },
+
+        sortTilesBySettings: function (aTiles, aSettings) {
+            if (!Array.isArray(aSettings) || aSettings.length === 0) {
+                return aTiles;
+            }
+
+            // Normalize: remove all spaces for matching
+            function normalize(s) {
+                return String(s || "").replace(/\s+/g, "").toLowerCase();
+            }
+
+            // Build Order lookup from settings keyed by normalized Name
+            var oOrderMap = {};
+            aSettings.forEach(function (oSetting) {
+                if (oSetting.Name != null && oSetting.Order != null) {
+                    oOrderMap[normalize(oSetting.Name)] = Number(oSetting.Order);
+                }
+            });
+
+            // Sort tiles ascending by Order, tiles not in settings go to the end
+            return aTiles.slice().sort(function (a, b) {
+                var nOrderA = oOrderMap.hasOwnProperty(normalize(a.Name)) ? oOrderMap[normalize(a.Name)] : Number.MAX_VALUE;
+                var nOrderB = oOrderMap.hasOwnProperty(normalize(b.Name)) ? oOrderMap[normalize(b.Name)] : Number.MAX_VALUE;
+                return nOrderA - nOrderB;
+            });
+        },
+
+        fetchDetailTiles: function (sCtId, sCompoonentID, hash) {
+            this.setBusyOn();
+            var oLocalDataModel = this.getLocalDataModel();
+            var self = this;
+            $.ajax({
+                url: self.isRunninglocally()+ "/bo/Info_Def/",
+                method: "GET",
+                dataType: "json",
+                headers: {
+                    "X-NEXUS-Filter": '{"where":[{"field":"CT_ID","method":"eq","value":"' + sCtId + '"}]}'
+                },
+                data: {
+                    hash: hash
+                },
+                success: function (response1) {
+                    var aRows = Array.isArray(response1 && response1.rows) ? response1.rows : [];
+                    var aTdIds = aRows.map(function (row) {
+                        return row.TD_ID;
+                    }).filter(function (id) {
+                        return id !== undefined && id !== null;
+                    });
+                    var oNextUIState = this.getOwnerComponent().getHelper().getNextUIState(1);
+                    if (aTdIds.length === 0) {
+                        oLocalDataModel.setProperty("/detailTiles", []);
+                        oLocalDataModel.setProperty("/detailTileGroups", []);
+                        this.setBusyOff();
+                        this.getRouter()._oRoutes.Detail._oConfig.layout = "TwoColumnsMidExpanded";
+                        this.getRouter().navTo("Detail", { layout: oNextUIState.layout });
+                        return;
+                    }
+
+                    // Update share URL in model for tooltip binding
+                    var oSelectedNodeData = oLocalDataModel.getProperty("/selectedNodeData");
+                    var sVnId = oSelectedNodeData && oSelectedNodeData.VN_ID;
+                    if (sVnId) {
+                        oLocalDataModel.setProperty("/shareUrl", "https://trial.nexusic.com/?searchKey=Asset&searchValue=" + sVnId);
+                    } else {
+                        oLocalDataModel.setProperty("/shareUrl", "Share / Navigate");
+                    }
+
+                    // Second service call: get table definitions by TD_IDs
+                    $.ajax({
+                        url:  self.isRunninglocally()+ "/bo/Table_Def/",
+                        method: "GET",
+                        dataType: "json",
+                        headers: {
+                            "X-NEXUS-Filter": '{"where":[{"field":"TD_ID","method":"in","items":[' + aTdIds.join(",") + ']}]}'
+                        },
+                        data: {
+                            hash: hash
+                        },
+                        success: function (response2) {
+                            var aTiles = (Array.isArray(response2 && response2.rows) ? response2.rows : [])
+                                .reduce(function(aTiles, oTile) {
+                                    if (oTile.DT_ID === 1) {
+                                        aTiles.push(oTile);
+                                    }
+                                    return aTiles;
+                                }, []);
+
+                            // Fetch settings and sort tiles by Order (ascending)
+                            self.fetchSettings(hash).done(function (aSettings) {
+                                if (aSettings) {
+                                    // Filter settings by matching AssetType to current tiles
+                                    var fnNorm = function (s) { return String(s || "").replace(/\s+/g, "").toLowerCase(); };
+                                    var aTileKeys = aTiles.map(function (t) { return fnNorm(t.Name); });
+                                    var oAssetGroups = {};
+                                    aSettings.forEach(function (s) {
+                                        var sAt = s.AssetType || "";
+                                        if (!oAssetGroups[sAt]) oAssetGroups[sAt] = [];
+                                        oAssetGroups[sAt].push(s);
+                                    });
+                                    // Pick AssetType with most tile name matches
+                                    var sBestType = "";
+                                    var nBestCount = 0;
+                                    Object.keys(oAssetGroups).forEach(function (sAt) {
+                                        var nCount = oAssetGroups[sAt].filter(function (s) {
+                                            return aTileKeys.indexOf(fnNorm(s.Name)) !== -1;
+                                        }).length;
+                                        if (nCount > nBestCount) {
+                                            nBestCount = nCount;
+                                            sBestType = sAt;
+                                        }
+                                    });
+                                    var aFiltered = sBestType ? oAssetGroups[sBestType] : aSettings;
+                                    aTiles = self.sortTilesBySettings(aTiles, aFiltered);
+                                } else {
+                                    // Fallback to Name sorting if settings are not available
+                                    aTiles = aTiles.sort(function(a, b) {
+                                        var nameA = (a.Name || "").toLowerCase();
+                                        var nameB = (b.Name || "").toLowerCase();
+                                        if (nameA < nameB) return -1;
+                                        if (nameA > nameB) return 1;
+                                        return 0;
+                                    });
+                                }
+
+                                var oCategoryMap = {};
+                                aTiles.forEach(function (oTile) {
+                                    var sCategory = oTile.Category || oTile.category || "Uncategorized";
+                                    if (!oCategoryMap[sCategory]) {
+                                        oCategoryMap[sCategory] = [];
+                                    }
+                                    oCategoryMap[sCategory].push(oTile);
+                                });
+                                var aEffective = aSettings ? aFiltered : [];
+                                // Sort categories by the minimum tile Order within each category
+                                var fnNormCat = function (s) { return String(s || "").replace(/\s+/g, "").toLowerCase(); };
+                                var oSettingsOrderMap = {};
+                                if (Array.isArray(aEffective) && aEffective.length > 0) {
+                                    aEffective.forEach(function (oSetting) {
+                                        if (oSetting.Name != null && oSetting.Order != null) {
+                                            oSettingsOrderMap[fnNormCat(oSetting.Name)] = Number(oSetting.Order);
+                                        }
+                                    });
+                                }
+                                var aCategoryKeys = Object.keys(oCategoryMap);
+                                aCategoryKeys.sort(function (catA, catB) {
+                                    // Find minimum tile order in each category
+                                    var nMinA = Number.MAX_VALUE;
+                                    oCategoryMap[catA].forEach(function (t) {
+                                        var nOrd = oSettingsOrderMap[fnNormCat(t.Name)];
+                                        if (nOrd !== undefined && nOrd < nMinA) nMinA = nOrd;
+                                    });
+                                    var nMinB = Number.MAX_VALUE;
+                                    oCategoryMap[catB].forEach(function (t) {
+                                        var nOrd = oSettingsOrderMap[fnNormCat(t.Name)];
+                                        if (nOrd !== undefined && nOrd < nMinB) nMinB = nOrd;
+                                    });
+                                    if (nMinA !== nMinB) return nMinA - nMinB;
+                                    // Fallback to alphabetical if same order
+                                    return catA.localeCompare(catB);
+                                });
+                                var aTileGroups = aCategoryKeys.map(function (sCategory) {
+                                    return {
+                                        Category: sCategory,
+                                        tiles: self.sortTilesBySettings(oCategoryMap[sCategory], aEffective)
+                                    };
+                                });
+                                oLocalDataModel.setProperty("/detailTiles", aTiles);
+                                oLocalDataModel.setProperty("/detailTileGroups", aTileGroups);
+                                this.setBusyOff();
+                                this.getRouter()._oRoutes.Detail._oConfig.layout = "TwoColumnsMidExpanded";
+                                this.getRouter().navTo("Detail", { layout: oNextUIState.layout });
+                            }.bind(this));
+                        }.bind(this),
+                        "error": function () {
+                            MessageBox.error("Error while fetching table definitions");
+                            this.setBusyOff();
+                        }.bind(this)
+                    });
+                }.bind(this),
+                "error": function () {
+                    MessageBox.error("Error while fetching info definitions");
+                    this.setBusyOff();
+                }.bind(this)
+            });
+        },
+        getoHashToken: function () {
+            var self = this;
+            var oModel = this.getLocalDataModel();
+            var oComponent = this.getOwnerComponent();
+
+            // 1. Cached — token already resolved in this session, return immediately.
+            var sCachedToken = oModel && oModel.getProperty("/HashToken");
+            if (sCachedToken) {
+                return $.Deferred().resolve({
+                    hash:        sCachedToken,
+                    id:          oModel.getProperty("/HashUserId"),
+                    restEndPoint: oModel.getProperty("/HashRestEndPoint")
+                }).promise();
+            }
+
+            // 2. In-flight — another controller already started the request; piggyback on it.
+            if (oComponent._oHashTokenDeferred && oComponent._oHashTokenDeferred.state() === "pending") {
+                return oComponent._oHashTokenDeferred.promise();
+            }
+
+            // 3. New request — create shared deferred stored on the component so all
+            //    controllers that call getoHashToken() concurrently get the same result.
+            var oDeferred = $.Deferred();
+            oComponent._oHashTokenDeferred = oDeferred;
+
+            // Clear the shared deferred on completion so future calls re-request normally.
+            oDeferred.always(function () {
+                oComponent._oHashTokenDeferred = null;
+            });
+
+            // Step 1 — Ask CAP backend to initiate the async hash request.
+            // Authentication is handled by XSUAA (user's existing BTP session).
+            // Returns a nonce immediately; hash arrives via Nexus callback.
+            // timeout 120000: HTML5/managed approuter default is 30s and
+            // otherwise returns a gateway error while users are willing to wait.
+            $.ajax({
+                url:         self.isRunninglocally() + "/api/license/requestHash",
+                method:      "POST",
+                contentType: "application/json",
+                timeout:     120000,
+                success: function (oResponse) {
+                    // CAP OData v4 returns action/function results directly (no value wrapper)
+                    var sNonce      = oResponse && oResponse.nonce;
+                    var sNexusStat  = oResponse && oResponse.nexusStatus;
+
+                    if (!sNonce) {
+                        MessageBox.error("License request failed: no nonce received.");
+                        oDeferred.reject();
+                        return;
+                    }
+                    // nexusStatus is "ok" on success; any other value means Nexus rejected
+                    // the /requestHash call — no callback will arrive, so fail immediately.
+                    if (sNexusStat && sNexusStat !== "ok") {
+                        MessageBox.error("Nexus license request failed: " + sNexusStat);
+                        oDeferred.reject();
+                        return;
+                    }
+
+                    // Step 2 — Poll for the result every 2 seconds (max 5 minutes).
+                    var iAttempts    = 0;
+                    var iMaxAttempts = 150; // 150 × 2s = 5 minutes
+                    var iInterval = setInterval(function () {
+                        iAttempts++;
+                        $.ajax({
+                            url:      self.isRunninglocally() + "/api/license/result(nonce='" + encodeURIComponent(sNonce) + "')",
+                            method:   "GET",
+                            dataType: "json",
+                            success: function (oPollResponse) {
+                                // CAP OData v4 returns function results directly (no value wrapper)
+                                var sStatus = oPollResponse && oPollResponse.status;
+                                if (sStatus === "complete") {
+                                    var sToken = oPollResponse.token;
+                                    if (!sToken) {
+                                        clearInterval(iInterval);
+                                        self.setBusyOff();
+                                        MessageBox.error("License token was not received. Please try again.");
+                                        oDeferred.reject();
+                                        return;
+                                    }
+                                    clearInterval(iInterval);
+                                    self.getLocalDataModel().setProperty("/HashToken", sToken);
+                                    self.getLocalDataModel().setProperty("/HashUserId", oPollResponse.userId);
+                                    self.getLocalDataModel().setProperty("/HashRestEndPoint", oPollResponse.restEndPoint);
+                                    oDeferred.resolve({ hash: sToken, id: oPollResponse.userId, restEndPoint: oPollResponse.restEndPoint });
+                                } else if (sStatus === "failed") {
+                                    clearInterval(iInterval);
+                                    self.setBusyOff();
+                                    MessageBox.error(oPollResponse.message || "Nexus license request failed.");
+                                    oDeferred.reject();
+                                } else if (sStatus === "expired") {
+                                    clearInterval(iInterval);
+                                    self.setBusyOff();
+                                    MessageBox.error("License session expired. Please try again.");
+                                    oDeferred.reject();
+                                } else if (iAttempts >= iMaxAttempts) {
+                                    clearInterval(iInterval);
+                                    self.setBusyOff();
+                                    MessageBox.error("License request timed out — Nexus did not respond. Please try again.");
+                                    oDeferred.reject();
+                                }
+                                // status === 'pending': keep polling
+                            },
+                            error: function (jqXHR) {
+                                clearInterval(iInterval);
+                                self.setBusyOff();
+                                if (jqXHR.status === 403) {
+                                    MessageBox.error("Session mismatch. Please reload the page and try again.");
+                                } else {
+                                    MessageBox.error("Error checking license status. Please try again.");
+                                }
+                                oDeferred.reject();
+                            }
+                        });
+                    }, 2000);
+                },
+                error: function (oError) {
+                    self.setBusyOff();
+                    var sMsg;
+                    if (oError.statusText === "timeout") {
+                        sMsg = "License request is still running. Please wait and try again.";
+                    } else if (oError.status === 401) {
+                        sMsg = "Your session has expired. Please reload the page.";
+                    } else {
+                        sMsg = (oError.responseJSON && oError.responseJSON.error && oError.responseJSON.error.message)
+                            || "Error requesting license. Please try again.";
+                    }
+                    MessageBox.error(sMsg);
+                    oDeferred.reject();
+                }
+            });
+
+            return oDeferred.promise();
+        },
+        saveSessionState: function (sHash, aPayload) {
+            if (!sHash || !Array.isArray(aPayload) || aPayload.length === 0) {
+                return $.Deferred().resolve().promise();
+            }
+
+            return $.ajax({
+                url: this.isRunninglocally() + "/setting/?hash=" + encodeURIComponent(sHash),
+                method: "POST",
+                contentType: "application/json",
+                data: JSON.stringify(aPayload)
+            }).fail(function (xhr, sStatus, sError) {
+                console.warn("Failed to persist session state:", sStatus || sError);
+            });
+        },
+
+        loadSessionState: function (sHash, sCategory, sSubCategory) {
+            if (!sHash || !sCategory || !sSubCategory) {
+                return $.Deferred().resolve([]).promise();
+            }
+
+            return $.ajax({
+                url: this.isRunninglocally() + "/setting/" +
+                    encodeURIComponent(sCategory) + "/" +
+                    encodeURIComponent(sSubCategory) +
+                    "/?hash=" + encodeURIComponent(sHash),
+                method: "GET",
+                dataType: "json"
+            }).then(
+                function (response) {
+                    return Array.isArray(response) ? response
+                        : (Array.isArray(response && response.rows) ? response.rows : []);
+                },
+                function (xhr) {
+                    if (xhr && xhr.status !== 404) {
+                        console.warn("Failed to load session state: HTTP", xhr.status);
+                    }
+                    return [];
+                }
+            );
+        },
+        getSapIcons: function () {
+            // Only non-component type icons (actions, statuses, devices, etc.)
+            return [
+                "sap-icon://cloud",
+                "sap-icon://key",
+                "sap-icon://calendar",
+                "sap-icon://history",
+                "sap-icon://flag",
+                "sap-icon://calendar-appointment",
+                "sap-icon://calendar-triangle",
+                "sap-icon://map",
+                "sap-icon://world",
+                "sap-icon://present",
+                "sap-icon://shipping-status",
+                "sap-icon://travel-request",
+                "sap-icon://umbrella",
+                "sap-icon://weather-proofing",
+                "sap-icon://heating-cooling",
+                "sap-icon://nutrition-activity",
+                "sap-icon://insurance-house",
+                "sap-icon://insurance-life",
+                "sap-icon://insurance-car",
+                "sap-icon://badge",
+                "sap-icon://bookmark",
+                "sap-icon://building",
+                "sap-icon://business-card",
+                "sap-icon://certificate",
+                "sap-icon://cloudy",
+                "sap-icon://contacts",
+                "sap-icon://credit-card",
+                "sap-icon://customer-view",
+                "sap-icon://factory",
+                "sap-icon://family-care",
+                "sap-icon://fax",
+                "sap-icon://globe",
+                "sap-icon://hospital",
+                "sap-icon://lab",
+                "sap-icon://leads",
+                "sap-icon://map-2",
+                "sap-icon://milestone",
+                "sap-icon://money-bills",
+                "sap-icon://notes",
+                "sap-icon://official-service",
+                "sap-icon://outbox",
+                "sap-icon://passenger-train",
+                "sap-icon://payment-approval",
+                "sap-icon://person-placeholder",
+                "sap-icon://pharmacy",
+                "sap-icon://pool",
+                "sap-icon://post",
+                "sap-icon://receipt",
+                "sap-icon://retail-store",
+                "sap-icon://stethoscope",
+                "sap-icon://suitcase",
+                "sap-icon://tag",
+                "sap-icon://taxi",
+                "sap-icon://temperature",
+                "sap-icon://toaster",
+                "sap-icon://travel-expense",
+                "sap-icon://truck-load",
+                "sap-icon://wallet"
+            ];
+        }
+    });
+});

@@ -1,0 +1,4636 @@
+sap.ui.define([
+    "com/nexus/asset/controller/BaseController",
+    "sap/m/MessageToast",
+    "sap/ui/core/Fragment",
+    "sap/ui/model/json/JSONModel",
+    "sap/m/Label",
+    "sap/m/Text",
+    "sap/m/Input",
+    "sap/m/DatePicker",
+    "sap/m/CheckBox",
+    "sap/m/Select",
+    "sap/m/VBox",
+    "sap/ui/layout/form/SimpleForm",
+    "sap/ui/core/Item",
+    "sap/m/MessageBox",
+    "sap/m/Link",
+    "sap/m/Popover",
+    "sap/m/List",
+    "sap/m/StandardListItem",
+    "sap/m/DisplayListItem"
+], (BaseController, MessageToast, Fragment, JSONModel, Label, Text, Input, DatePicker, CheckBox, Select, VBox, SimpleForm, Item, MessageBox, Link, Popover, List, StandardListItem, DisplayListItem) => {
+    "use strict";
+
+    return BaseController.extend("com.nexus.asset.controller.Detail", {
+        onInit() {
+            var oExitButton = this.getView().byId("exitFullScreenBtnMid"),
+                oEnterButton = this.getView().byId("enterFullScreenBtnMid");
+            this.getLocalDataModel().setProperty("/shareUrl", this.getResourceBundle().getText("tooltipShareNavigate"));
+            var oRouter = this.getRouter();
+            if (oRouter) {
+                oRouter.getRoute("Detail").attachPatternMatched(this.onRouteMatched, this);
+            }
+            [oExitButton, oEnterButton].forEach(function (oButton) {
+                oButton.addEventDelegate({
+                    onAfterRendering: function () {
+                        if (this.bFocusFullScreenButton) {
+                            this.bFocusFullScreenButton = false;
+                            oButton.focus();
+                        }
+                    }.bind(this)
+                });
+            }, this);
+            sap.ui.getCore().getEventBus().subscribe("Detail", "UpdateBreadcrumb", this.updateBreadcrumb, this);
+            // Initialize for caching previous node and building node index
+            this._sPreviousSelectedNodeId = null;
+            this._oNodeInfoIndex = {};
+            this._bNodeInfoIndexValid = false; // Track index validity with O(1) flag instead of Object.keys()
+
+            // Monitor nodeInfoArray for changes to invalidate index
+            var oLocalDataModel = this.getLocalDataModel();
+            this._fnPropertyChangeListener = function (oEvent) {
+                if (oEvent.getParameter("path") === "/nodeInfoArray") {
+                    // Invalidate index when nodeInfoArray changes (O(1) flag instead of reset)
+                    this._bNodeInfoIndexValid = false;
+                }
+            }.bind(this);
+            oLocalDataModel.attachPropertyChange(this._fnPropertyChangeListener);
+
+            // Load Unit and Unit_Type reference data on app start
+            this._aUnitData = [];
+            this._aUnitTypeData = [];
+            this._oUserPreferredUnitByType = {}; // Map of UT_ID -> preferred Unit_ID from Unit_Item
+            this._aRawUnitItems = []; // Raw Unit_Item records (Unit_Item has no UT_ID, needs cross-ref with Unit)
+            this._bUserPreferredMapBuilt = false;
+            this._loadUnitReferenceData();
+        },
+
+        _loadUnitReferenceData: function () {
+            var self = this;
+            var oLocalDataModel = this.getLocalDataModel();
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+
+            var fnFetch = function (sResolvedHash) {
+                // Load Unit data
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/Unit/",
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": { "hash": sResolvedHash, "pageSize": 1000 },
+                    "success": function (response) {
+                        self._aUnitData = Array.isArray(response && response.rows) ? response.rows
+                            : (Array.isArray(response) ? response : []);
+                    },
+                    "error": function () {
+                        MessageBox.error("Failed to load Unit data");
+                    }
+                });
+
+                // Load Unit_Type data
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/Unit_Type/",
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": { "hash": sResolvedHash, "pageSize": 1000 },
+                    "success": function (response) {
+                        self._aUnitTypeData = Array.isArray(response && response.rows) ? response.rows
+                            : (Array.isArray(response) ? response : []);
+                    },
+                    "error": function () {
+                        MessageBox.error("Failed to load Unit_Type data");
+                    }
+                });
+            };
+
+            if (sHash) {
+                fnFetch(sHash);
+                // Use cached userId from model; only fetch a new token if not yet stored
+                var iCachedUserId = oLocalDataModel.getProperty("/HashUserId");
+                if (iCachedUserId) {
+                    self._loadUserUnitPreferences(iCachedUserId, sHash);
+                } else {
+                    self.getoHashToken().done(function (oResult) {
+                        if (oResult && oResult.id) {
+                            self._loadUserUnitPreferences(oResult.id, sHash);
+                        }
+                    });
+                }
+            } else {
+                this.getoHashToken().done(function (oResult) {
+                    var sFetchedHash = oResult && oResult.hash;
+                    if (sFetchedHash) { fnFetch(sFetchedHash); }
+                    // Load user unit preferences with the login id
+                    if (oResult && oResult.id && sFetchedHash) {
+                        self._loadUserUnitPreferences(oResult.id, sFetchedHash);
+                    }
+                });
+            }
+        },
+
+        /**
+         * After successful login, fetch Personnel record by SU_ID to get UG_ID,
+         * then fetch Unit_Item preferences by UG_ID if available.
+         */
+        _loadUserUnitPreferences: function (iUserId, sHash) {
+            var self = this;
+
+            $.ajax({
+                "url": self.isRunninglocally() + "/bo/Personnel/",
+                "method": "GET",
+                "dataType": "json",
+                "headers": {
+                    "X-NEXUS-Filter": JSON.stringify({
+                        "where": [{ "field": "SU_ID", "value": iUserId }]
+                    })
+                },
+                "data": { "hash": sHash },
+                "success": function (response) {
+                    var aRows = Array.isArray(response && response.rows) ? response.rows
+                        : (Array.isArray(response) ? response : []);
+
+                    if (aRows.length === 0) { return; }
+
+                    var oPersonnel = aRows[0];
+                    var iUgId = oPersonnel.UG_ID;
+                    if (!iUgId) { return; }
+
+                    self._loadUnitItemsByGroup(iUgId, sHash);
+                },
+                "error": function () { /* silent - continue without preferences */ }
+            });
+        },
+
+        /**
+         * Fetch Unit_Item records for the user's Unit Group.
+         * Unit_Item has Unit_ID but no UT_ID — must cross-ref with /bo/Unit/ data.
+         */
+        _loadUnitItemsByGroup: function (iUgId, sHash) {
+            var self = this;
+
+            $.ajax({
+                "url": self.isRunninglocally() + "/bo/Unit_Item/",
+                "method": "GET",
+                "dataType": "json",
+                "headers": {
+                    "X-NEXUS-Filter": JSON.stringify({
+                        "where": [{ "field": "UG_ID", "method": "eq", "value": iUgId }]
+                    })
+                },
+                "data": { "hash": sHash, "pageSize": 1000 },
+                "success": function (response) {
+                    var aItems = Array.isArray(response && response.rows) ? response.rows
+                        : (Array.isArray(response) ? response : []);
+
+                    self._aRawUnitItems = aItems;
+                    self._bUserPreferredMapBuilt = false;
+                },
+                "error": function () { /* silent - continue without preferences */ }
+            });
+        },
+
+        /**
+         * Build index map of Full_Location -> node for O(1) lookups
+         * @returns {Object} Object with Full_Location as key, node as value
+         */
+        _buildNodeInfoIndex: function () {
+            var oLocalDataModel = this.getLocalDataModel();
+            var aNodeInfoArray = oLocalDataModel.getProperty("/nodeInfoArray") || [];
+            var oIndex = {};
+
+            aNodeInfoArray.forEach(function (oNode) {
+                var sFullLocation = this._getFullLocation(oNode);
+                if (sFullLocation) {
+                    oIndex[sFullLocation] = oNode;
+                }
+            }.bind(this));
+
+            return oIndex;
+        },
+        onRouteMatched: function () {
+            this.setBusyOff();
+            var oLocalDataModel = this.getLocalDataModel();
+            var oSelectedNode = oLocalDataModel.getProperty("/selectedNodeData");
+
+            // Update share URL in model for tooltip binding
+            if (oSelectedNode && oSelectedNode.VN_ID) {
+                oLocalDataModel.setProperty("/shareUrl", "https://trial.nexusic.com/?searchKey=Asset&searchValue=" + oSelectedNode.VN_ID);
+            } else {
+                oLocalDataModel.setProperty("/shareUrl", this.getResourceBundle().getText("tooltipShareNavigate"));
+            }
+
+            // Force breadcrumb rebuild on every route match so the breadcrumb is always
+            // in sync with the selected node — even on the first navigation where the
+            // Detail view was not yet instantiated when the UpdateBreadcrumb event fired.
+            this._sPreviousSelectedNodeId = null;
+            this.updateBreadcrumb();
+        },
+
+        updateBreadcrumb: function () {
+            var oLocalDataModel = this.getLocalDataModel();
+            var oSelectedNode = oLocalDataModel.getProperty("/selectedNodeData");
+
+            // Only rebuild breadcrumb if the selected node changed
+            var sCurrentNodeId = oSelectedNode && oSelectedNode.VN_ID;
+            if (sCurrentNodeId === this._sPreviousSelectedNodeId) {
+                return; // No change, skip rebuild
+            }
+
+            this._sPreviousSelectedNodeId = sCurrentNodeId;
+
+            var aBreadcrumb = [];
+            if (oSelectedNode) {
+                var fullLocation = this._getFullLocation(oSelectedNode);
+                if (fullLocation) {
+                    // Build breadcrumb using shared utility method from BaseController
+                    aBreadcrumb = this._buildBreadcrumbSegments(fullLocation).map(function (segment) {
+                        return Object.assign({}, segment, {
+                            CV_ID: oSelectedNode.CV_ID
+                        });
+                    });
+                }
+            }
+            //oLocalDataModel.setProperty("/breadcrumb", aBreadcrumb);
+            oLocalDataModel.setProperty("/breadcrumbLinks", aBreadcrumb.slice(0, -1));
+            oLocalDataModel.setProperty("/breadcrumbCurrent", aBreadcrumb[aBreadcrumb.length - 1]?.name || "");
+        },
+
+        onExit: function () {
+            // Clean up all property change listeners to prevent memory leaks
+            var oLocalDataModel = this.getLocalDataModel();
+            if (oLocalDataModel) {
+                if (this._fnPropertyChangeListener) {
+                    oLocalDataModel.detachPropertyChange(this._fnPropertyChangeListener);
+                }
+                if (this._fnDetailAutoSelectListener) {
+                    oLocalDataModel.detachPropertyChange(this._fnDetailAutoSelectListener);
+                }
+            }
+        },
+
+        onBreadcrumbPress: function (oEvent) {
+            var oContext = oEvent.getSource().getBindingContext("LocalDataModel");
+            var oData = oContext.getObject();
+            var sTargetFullLocation = oData.fullLocation;
+
+            if (!sTargetFullLocation) {
+                return;
+            }
+
+            var oLocalDataModel = this.getLocalDataModel();
+            var sTargetAsset = oData.CV_ID;
+            var oNode = null;
+
+            // Build or use cached index for O(1) lookup (O(1) validity check instead of Object.keys())
+            if (!this._bNodeInfoIndexValid) {
+                this._oNodeInfoIndex = this._buildNodeInfoIndex();
+                this._bNodeInfoIndexValid = true;
+            }
+
+            if (sTargetFullLocation) {
+                oNode = this._oNodeInfoIndex[sTargetFullLocation];
+            }
+
+            if (oNode && oNode.CV_ID) {
+                oLocalDataModel.setProperty("/selectedNodeData", oNode);
+                sTargetAsset = sTargetAsset || oNode.CV_ID;
+            }
+
+            // Tell Master to focus/select this node in the tree
+            sap.ui.getCore().getEventBus().publish("Master", "FocusNodeFromBreadcrumb", {
+                nodeData: oNode,
+                fullLocation: sTargetFullLocation,
+                CV_ID: sTargetAsset
+            });
+
+            // Trigger same action as node selection
+            if (oNode && oNode.CT_ID) {
+                this.fetchDetailTiles(oNode.CT_ID, oNode.Component_ID, oLocalDataModel.getProperty("/HashToken"));
+            } else {
+                oLocalDataModel.setProperty("/detailTiles", []);
+                oLocalDataModel.setProperty("/detailTileGroups", []);
+                var oNextUIState = this.getOwnerComponent().getHelper().getNextUIState(1);
+                this.getRouter()._oRoutes.Detail._oConfig.layout = "TwoColumnsMidExpanded";
+                this.getRouter().navTo("Detail", { layout: oNextUIState.layout });
+                this.setBusyOff();
+            }
+        },
+        onTilePress: function (oEvent) {
+            var self = this;
+            var oContext = oEvent.getSource().getBindingContext("LocalDataModel");
+            if (!oContext) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoTileContext"));
+                return;
+            }
+
+            var sTableName = oContext.getProperty("Table_Name");
+            if (!sTableName) {
+                MessageToast.show(this.getResourceBundle().getText("msgTableNameMissing"));
+                return;
+            }
+
+            // Get the tile title/name for the dialog header
+            var sTileTitle = oContext.getProperty("Name") || sTableName;
+
+            var oLocalDataModel = this.getLocalDataModel();
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            this.setBusyOn();
+            var fnCallTableApi = function (sResolvedHash) {
+                this.setBusyOn();
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sTableName),
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": {
+                        "hash": sResolvedHash
+                    },
+                    "success": function (response) {
+                        oLocalDataModel.setProperty("/selectedTableName", sTableName);
+                        oLocalDataModel.setProperty("/selectedTableData", response);
+                        this.openDynamicFormDialog(sTableName, response, sTileTitle);
+                        this.setBusyOff();
+                    }.bind(this),
+                    "error": function () {
+                        MessageToast.show(this.getResourceBundle().getText("msgErrorFetchingTableData"));
+                        this.setBusyOff();
+                    }.bind(this)
+                });
+            }.bind(this);
+
+            if (sHash) {
+                fnCallTableApi(sHash);
+                return;
+            }
+
+            this.getoHashToken().done(function (oResult) {
+                var sFetchedHash = oResult && oResult.hash;
+                if (!sFetchedHash) {
+                    MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+                    return;
+                }
+                fnCallTableApi(sFetchedHash);
+            }).fail(function () {
+                MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+            });
+        },
+        onSAPDATATilePress: function (oEvent) {
+            var self = this;
+            var oLocalDataModel = this.getLocalDataModel();
+            var oSelectedNode = oLocalDataModel.getProperty("/selectedNodeData");
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+
+            if (!oSelectedNode || !oSelectedNode.Component_ID) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoAssetSelected"));
+                return;
+            }
+            var sComponentId = oSelectedNode.Component_ID;
+            // Fetch external references for this component
+            var fnFetchExternalReferences = function (sResolvedHash) {
+                self.setBusyOn();
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/External_References/" + encodeURIComponent(sComponentId),
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": {
+                        "hash": sResolvedHash
+                    },
+                    "success": function (response) {
+                        // Extract data from response
+                        var oRecord = response;
+                        if (Array.isArray(response.rows) && response.rows.length > 0) {
+                            oRecord = response.rows[0];
+                        } else if (Array.isArray(response) && response.length > 0) {
+                            oRecord = response[0];
+                        }
+
+                        var sFunctionalLocation = oRecord.Functional_Location || "";
+                        var sExternalReferenceId = oRecord.External_Reference_ID || "";
+                        var sEquipmentId = oRecord.Equipment_Number || "";
+                        if (sEquipmentId && sExternalReferenceId.length > 0 && sExternalReferenceId.length < 18) {
+                            sExternalReferenceId = sExternalReferenceId.padStart(18, "0");
+                        }
+                        // Navigate to SAP with the extracted values
+                        var sUrl = "https://pipl-sapa23.pilogcloud.com:8100/sap/bc/ui2/flp?sap-client=100&sap-language=EN#MaintenanceObject-displayFactSheet";
+                        if (sEquipmentId) {
+                            sUrl += "&/C_ObjPgTechnicalObject(TechObjIsEquipOrFuncnlLoc='EAMS_EQUI',TechnicalObject=%27" + encodeURIComponent(sExternalReferenceId) + "%27)";
+                        } else if (sFunctionalLocation) {
+                            sUrl += "&/C_ObjPgTechnicalObject(TechObjIsEquipOrFuncnlLoc='EAMS_FL',TechnicalObject=%27" + encodeURIComponent(sExternalReferenceId) + "%27)";
+                        }
+                        if (sEquipmentId == "" && sFunctionalLocation == "") {
+                            MessageBox.error(self.getResourceBundle().getText("msgNoValidReference"));
+                            self.setBusyOff();
+                            return;
+                        }
+                        window.open(sUrl, "_blank"); // _self
+                        self.setBusyOff();
+                    },
+                    "error": function () {
+                        MessageBox.error(self.getResourceBundle().getText("msgErrorFetchingExternalReferences"));
+                        self.setBusyOff();
+                    }
+                });
+            };
+
+            if (sHash) {
+                fnFetchExternalReferences(sHash);
+                return;
+            }
+
+            // If no hash available, fetch it first
+            this.getoHashToken().done(function (oResult) {
+                var sFetchedHash = oResult && oResult.hash;
+                if (!sFetchedHash) {
+                    MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+                    return;
+                }
+                fnFetchExternalReferences(sFetchedHash);
+            }).fail(function () {
+                MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+            });
+        },
+        openDynamicFormDialog: function (sTableName, oFormData, sTileTitle) {
+
+            var oCategorizedFields = {};
+            var aFields = (Array.isArray(oFormData && oFormData.fields) ? oFormData.fields : [])
+                .filter(function (oField) { return Number(oField.fieldTypeId) !== 15; });
+
+            if (!aFields.length) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoFieldsAvailable"));
+                return;
+            }
+
+            // Derive IconTabFilter categories from each field's 'category' property.
+            // Fields that have no 'category' are grouped under the tile name.
+            var sDefaultCategory = sTileTitle || sTableName || "General";
+            // Stash so post-validation visibility logic uses the same fallback (the tile
+            // name) instead of re-deriving from oFormData.categories[0], which is unstable
+            // after the category sort.
+            this._defaultCategoryName = sDefaultCategory;
+            var aCategoryOrder = [];
+            var oCategorySet = {};
+
+             // Two-pass build: register category order using only visible fields so that
+            // hidden system fields (Component_ID, Link_ID, Guid, etc.) — which have no
+            // `category` and would otherwise force the default tile category to be added
+            // first — don't pollute the originalIndex tiebreaker used during category sort.
+            aFields.forEach(function (oField) {
+                if (oField.gridVisible !== true && oField.formVisible !== true) { return; }
+                var sCat = oField.category || sDefaultCategory;
+                if (!oCategorySet[sCat]) {
+                    oCategorySet[sCat] = true;
+                    aCategoryOrder.push(sCat);
+                    oCategorizedFields[sCat] = [];
+                }
+            });
+            aFields.forEach(function (oField) {
+                var sCat = oField.category || sDefaultCategory;
+                if (!oCategorySet[sCat]) {
+                    oCategorySet[sCat] = true;
+                    aCategoryOrder.push(sCat);
+                    oCategorizedFields[sCat] = [];
+                }
+                oCategorizedFields[sCat].push(oField);
+            });
+
+            var oOriginalCategoryMeta = {};
+            (Array.isArray(oFormData && oFormData.categories) ? oFormData.categories : []).forEach(function (oCat) {
+                if (oCat && oCat.name) {
+                    oOriginalCategoryMeta[oCat.name] = oCat;
+                }
+            });
+            oFormData.categories = aCategoryOrder.map(function (sName) {
+                var oMeta = oOriginalCategoryMeta[sName];
+                return oMeta ? Object.assign({}, oMeta, { name: sName }) : { name: sName };
+            });
+            var self = this;
+            // Create dialog content model with tile title as dialog title
+            var oDialogModel = {
+                title: sTileTitle || sTableName,
+                formData: oFormData,
+                categorizedFields: oCategorizedFields
+            };
+            // Load and open the dialog
+            if (!self._oFormDialog) {
+                self._oFormDialog = sap.ui.xmlfragment(
+                    "com.nexus.asset.view.DynamicFormDialog",
+                    self
+                );
+                self.getView().addDependent(self._oFormDialog);
+            }
+
+            var oModel = new JSONModel(oDialogModel);
+            self._oFormDialog.setModel(oModel, "FormData");
+
+            // Build form content dynamically
+            self._fieldControlMap = {};
+            self._fieldVisibilityMap = {};
+            self._fieldBusinessObjectMap = {};
+            self._boScopedControlMap = {};
+            self._boParentFieldMap = {};
+            self._linkedDataByBO = {};
+            self._cascadeFieldOrder = {};
+            self._colourInputMap = {};
+            self._colourValueMap = {};
+            self._skipColorFields = {};
+            self._unitLinkMap = {};
+            self._unitFieldInfo = {};
+            self._categoryTabMap = {};
+            self._simpleForms = [];
+            self._pendingComboBoxValues = {};
+            self._pendingLookupCount = 0;
+            self._formDataTableName = sTableName;
+            self._subTableControls = [];
+            self._nestedLookupFieldMap = {};
+            self._nestedForeignKeyFieldMap = {};
+
+            var fnBuildAndOpen = function () {
+                self.buildFormContent(oFormData, oCategorizedFields);
+                // Set busy indicator to show immediately when dialog opens
+                self._oFormDialog.setBusyIndicatorDelay(0);
+                self._oFormDialog.setBusy(true);
+                self._oFormDialog.open();
+                // After form is opened, check if there are pending lookups
+                // If no lookups, load form data immediately
+                // Otherwise, it will be called after all lookups complete
+                if (self._pendingLookupCount === 0) {
+                    self._loadFormData(sTableName);
+                }
+                // Attach change handlers to all form fields for live validation
+                setTimeout(function () {
+                    self._attachFormFieldChangeHandlers();
+                }, 300);
+            };
+
+            var sHash = self.getLocalDataModel().getProperty("/HashToken");
+            if (sHash) {
+                self._expandForeignTableFields(oFormData, oCategorizedFields, sHash, fnBuildAndOpen);
+            } else {
+                self.getoHashToken().done(function (oResult) {
+                    var sFetchedHash = oResult && oResult.hash;
+                    self._expandForeignTableFields(oFormData, oCategorizedFields, sFetchedHash || "", fnBuildAndOpen);
+                }).fail(function () {
+                    fnBuildAndOpen();
+                });
+            }
+        },
+        _expandForeignTableFields: function (oFormData, oCategorizedFields, sResolvedHash, fnCallback) {
+            var self = this;
+            var aFields = Array.isArray(oFormData && oFormData.fields) ? oFormData.fields : [];
+
+            // Find all fields that are foreign-table references.
+            // Skip a foreign field when the same metadata also has a "shadow" inverse
+            // field (fieldTypeId 42 with nestedField.businessObjectName equal to the
+            // foreign BO name + "___Inverse"). The inverse field renders the same
+            // foreign data via an f(n) popup, so expanding the foreign field would
+            // double-up the content. IC Web hides the foreign expansion in this case.
+            // Example: CIG_General_Information has Sensor_Location (foreign LT_Well_Sensor_Location)
+            // and Sensor_Location_Group (LT_Well_Sensor_Location___Inverse) — only the
+            // Group field should render. Component Location has no inverse counterpart,
+            // so it continues to expand as before.
+            var aForeignFields = aFields.filter(function (oField) {
+                if (oField.fieldTypeId !== 19 || !oField.foreignTableId) {
+                    return false;
+                }
+                var sParentBoName = oField.nestedField && oField.nestedField.businessObjectName;
+                if (sParentBoName) {
+                    var sInverseBoName = sParentBoName + "___Inverse";
+                    var bHasInverseField = aFields.some(function (oOther) {
+                        return oOther !== oField &&
+                            oOther.nestedField &&
+                            oOther.nestedField.businessObjectName === sInverseBoName;
+                    });
+                    if (bHasInverseField) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+
+            if (aForeignFields.length === 0) {
+                fnCallback();
+                return;
+            }
+
+            var iRemaining = aForeignFields.length;
+
+            aForeignFields.forEach(function (oForeignField) {
+                var sForeignTableId = oForeignField.foreignTableId;
+                // Match the bucketing logic in openDynamicFormDialog: fields with no
+                // explicit `category` are placed in `_defaultCategoryName` (the tile
+                // title), NOT in oFormData.categories[0]. The first metadata category
+                // is often unrelated (e.g. "Performance Standard" on CIG_General_Information),
+                // so falling back to it caused the splice in oCategorizedFields to miss
+                // — the BO-expanded fields never appeared in the correct tab and the
+                // parent foreign field stayed hidden via nestedField.formVisible:false
+                // (observed: Component Location field disappeared from Component Data tab).
+                var sParentCategory = oForeignField.category ||
+                    self._defaultCategoryName ||
+                    (oFormData.categories && oFormData.categories[0] && oFormData.categories[0].name) || "General";
+
+                $.ajax({
+                    "url": self.isRunninglocally() + "/boByKey/" + encodeURIComponent(sForeignTableId),
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": { "hash": sResolvedHash },
+                    "success": function (response) {
+                        var aResponseFields = Array.isArray(response && response.fields) ? response.fields : [];
+
+                        // override fieldTypeId to force form control generation for expanded fields
+                        aResponseFields.forEach(function (val) { val.fieldTypeId = 57; });
+
+                        var oNestedField = oForeignField.nestedField;
+                        // Prefer nestedField.businessObjectName; fall back to the top-level
+                        // businessObjectName returned directly by /boByKey response.
+                        var sBusinessObjectName = (oNestedField && oNestedField.businessObjectName)
+                            || response.businessObjectName;
+                        var sFilterField = oNestedField && oNestedField.fieldName;
+
+                        if (sBusinessObjectName) {
+                            var sParentTableName = self._formDataTableName;
+                            var sParentFieldName = oForeignField.fieldName || oForeignField.name;
+                            var sCompId = self.getLocalDataModel().getProperty("/sCompoonentID");
+
+                            // Store mapping so _saveFormData can resolve cascade selections back to parent field
+                            if (sFilterField) {
+                                self._boParentFieldMap[sBusinessObjectName] = {
+                                    parentFieldName: sParentFieldName,
+                                    filterField: sFilterField
+                                };
+                            }
+                            
+                            // Store mapping from expanded field names back to original API field name
+                            // This allows _populateFormFields to find values for expanded BO fields
+                            if (!self._expandedFieldToApiFieldMap) {
+                                self._expandedFieldToApiFieldMap = {};
+                            }
+                            aResponseFields.forEach(function (oExpandedField) {
+                                var sExpandedFieldName = oExpandedField.fieldName || oExpandedField.name;
+                                self._expandedFieldToApiFieldMap[sExpandedFieldName] = sParentFieldName;
+                            });
+
+                            // Always call /bo/{businessObjectName} to load dropdown options unconditionally.
+                            // The parent-record fetch is a secondary step only to pre-select the current value.
+                            $.ajax({
+                                "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sBusinessObjectName) + "/",
+                                "method": "GET",
+                                "dataType": "json",
+                                "data": { "hash": sResolvedHash, "pagesize": 1000 },
+                                "success": function (linkedResponse) {
+                                    oForeignField._linkedData = linkedResponse;
+                                    var aAllRows = [];
+                                    if (Array.isArray(linkedResponse.rows) && linkedResponse.rows.length > 0) {
+                                        aAllRows = linkedResponse.rows;
+                                    } else if (Array.isArray(linkedResponse) && linkedResponse.length > 0) {
+                                        aAllRows = linkedResponse;
+                                    }
+                                    self._linkedDataByBO[sBusinessObjectName] = aAllRows;
+                                    self._linkedFieldMatchInfo = self._linkedFieldMatchInfo || {};
+
+                                    if (sParentTableName && sCompId && sFilterField) {
+                                        // Fetch parent record to read the current link value for pre-selection
+                                        $.ajax({
+                                            "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sParentTableName) + "/" + encodeURIComponent(sCompId),
+                                            "method": "GET",
+                                            "dataType": "json",
+                                            "data": { "hash": sResolvedHash },
+                                            "success": function (parentResponse) {
+                                                var oParentRecord = parentResponse;
+                                                if (Array.isArray(parentResponse.rows) && parentResponse.rows.length > 0) {
+                                                    oParentRecord = parentResponse.rows[0];
+                                                } else if (Array.isArray(parentResponse) && parentResponse.length > 0) {
+                                                    oParentRecord = parentResponse[0];
+                                                }
+                                                var vLinkValue = oParentRecord && oParentRecord[sParentFieldName];
+                                                self._linkedFieldMatchInfo[sBusinessObjectName] = {
+                                                    filterField: sFilterField,
+                                                    linkValue: vLinkValue !== undefined ? vLinkValue : null
+                                                };
+                                                self._populateLinkedFields(linkedResponse, sBusinessObjectName);
+                                            },
+                                            "error": function () {
+                                                // Populate dropdowns without pre-selection if parent fetch fails
+                                                self._linkedFieldMatchInfo[sBusinessObjectName] = {
+                                                    filterField: sFilterField,
+                                                    linkValue: null
+                                                };
+                                                self._populateLinkedFields(linkedResponse, sBusinessObjectName);
+                                            }
+                                        });
+                                    } else {
+                                        // No parent record context — populate all dropdown options as-is
+                                        self._linkedFieldMatchInfo[sBusinessObjectName] = {
+                                            filterField: sFilterField || null,
+                                            linkValue: null
+                                        };
+                                        self._populateLinkedFields(linkedResponse, sBusinessObjectName);
+                                    }
+                                },
+                                "error": function () { /* silent – linked data unavailable */ }
+                            });
+                        }
+
+                        // Include fields where gridVisible or formVisible is explicitly true
+                        var aVisibleFields = aResponseFields.filter(function (oColField) {
+                            return oColField.gridVisible === true || oColField.formVisible === true;
+                        });
+                        // Stamp each expanded field with the parent's category and business object name
+                        // Force formVisible to true for fields selected by gridVisible,
+                        // so they are not hidden by buildFormContent's formVisible check
+                        var sBoGroupLabel = oForeignField.name || oForeignField.fieldName || sBusinessObjectName;
+                        aVisibleFields.forEach(function (oExpandedField) {
+                            oExpandedField.category = sParentCategory;
+                            oExpandedField.formVisible = true;
+                            if (sBusinessObjectName) {
+                                oExpandedField._businessObjectName = sBusinessObjectName;
+                            }
+                            oExpandedField._boGroupLabel = sBoGroupLabel;
+                        });
+
+                        // Replace the foreign-reference field with the expanded fields in oFormData.fields
+                        var iIdx = oFormData.fields.indexOf(oForeignField);
+                        if (iIdx !== -1) {
+                            oFormData.fields.splice.apply(oFormData.fields, [iIdx, 1].concat(aVisibleFields));
+                        }
+                        // Replace in oCategorizedFields
+                        if (oCategorizedFields[sParentCategory]) {
+                            var iCatIdx = oCategorizedFields[sParentCategory].indexOf(oForeignField);
+                            if (iCatIdx !== -1) {
+                                oCategorizedFields[sParentCategory].splice.apply(
+                                    oCategorizedFields[sParentCategory],
+                                    [iCatIdx, 1].concat(aVisibleFields)
+                                );
+                            }
+                        }
+
+                        iRemaining--;
+                        if (iRemaining === 0) { fnCallback(); }
+                    },
+                    "error": function () {
+                        // On error, remove the unresolvable foreign field and continue
+                        var iIdx = oFormData.fields.indexOf(oForeignField);
+                        if (iIdx !== -1) { oFormData.fields.splice(iIdx, 1); }
+                        if (oCategorizedFields[sParentCategory]) {
+                            var iCatIdx = oCategorizedFields[sParentCategory].indexOf(oForeignField);
+                            if (iCatIdx !== -1) { oCategorizedFields[sParentCategory].splice(iCatIdx, 1); }
+                        }
+                        iRemaining--;
+                        if (iRemaining === 0) { fnCallback(); }
+                    }
+                });
+            });
+        },
+        // Backend may omit formOrder when its value is 0 (default-value omission in JSON
+        // serializer), so a missing/null/empty/NaN value is treated as 0 ("first") rather
+        // than dropping the field to the bottom of its category.
+        _getFormOrderValue: function (oField) {
+            var v = oField && oField.formOrder;
+            if (v === undefined || v === null || v === "") { return 0; }
+            var n = parseInt(v, 10);
+            return Number.isNaN(n) ? 0 : n;
+        },
+        buildFormContent: function (oFormData, oCategorizedFields) {
+            var oTabBar = this._oFormDialog.getContent()[0];
+            oTabBar.destroyItems();
+
+            var self = this;
+            var aCategories = Array.isArray(oFormData && oFormData.categories) && oFormData.categories.length
+                ? oFormData.categories
+                : [{ name: "General" }];
+
+            // Keep category order aligned to metadata field ordering.
+            // Category order is defined by the lowest formOrder among visible fields in that category.
+            var oCategoryOriginalIndex = {};
+            aCategories.forEach(function (oCategory, iIndex) {
+                oCategoryOriginalIndex[oCategory.name] = iIndex;
+            });
+
+            var oCategoryMinOrder = {};
+            aCategories.forEach(function (oCategory) {
+                oCategoryMinOrder[oCategory.name] = Number.POSITIVE_INFINITY;
+            });
+
+            aCategories.forEach(function (oCategory) {
+                var aCategoryFields = Array.isArray(oCategorizedFields[oCategory.name]) ? oCategorizedFields[oCategory.name] : [];
+                aCategoryFields.forEach(function (oField) {
+                    if (!oField || (oField.gridVisible !== true && oField.formVisible !== true)) {
+                        return;
+                    }
+                    var iOrder = self._getFormOrderValue(oField);
+                    if (iOrder < oCategoryMinOrder[oCategory.name]) {
+                        oCategoryMinOrder[oCategory.name] = iOrder;
+                    }
+                });
+            });
+
+            aCategories = aCategories.slice().sort(function (a, b) {
+                var iA = oCategoryMinOrder[a.name];
+                var iB = oCategoryMinOrder[b.name];
+                if (iA !== iB) {
+                    return iA - iB;
+                }
+                return oCategoryOriginalIndex[a.name] - oCategoryOriginalIndex[b.name];
+            });
+
+            if (!oCategorizedFields.General && aCategories.length === 1 && aCategories[0].name === "General") {
+                oCategorizedFields.General = Array.isArray(oFormData && oFormData.fields) ? oFormData.fields : [];
+            }
+
+            // Create a tab for each category
+            aCategories.forEach(function (oCategory, iIndex) {
+                var aFormContent = [];
+                var aSubTableBlocks = []; // sub-table controls rendered above the form
+
+                if (oCategorizedFields[oCategory.name] && oCategorizedFields[oCategory.name].length > 0) {
+                    // Sort fields with metadata-visible fields ahead of metadata-hidden
+                    // ones. Visible fields are ordered by formOrder. Hidden fields keep
+                    // metadata file order (stable-sort no-op) — their formOrder values
+                    // often pair them with a visible counterpart (e.g. Global_Gas at 32
+                    // mirrors Pressure O/R at 32) and are not meaningful as a sequence
+                    // of their own. IC Web renders hidden helpers in metadata file order;
+                    // matching that here gets Global Liquid before Global Gas on the
+                    // Performance Standard tab.
+                    var aSortedFields = oCategorizedFields[oCategory.name].slice().sort(function (a, b) {
+                        var bHiddenA = a && a.formVisible === false;
+                        var bHiddenB = b && b.formVisible === false;
+                        if (bHiddenA !== bHiddenB) { return bHiddenA ? 1 : -1; }
+                        if (bHiddenA && bHiddenB) { return 0; }
+                        return self._getFormOrderValue(a) - self._getFormOrderValue(b);
+                    });
+
+                    // Group fields: BO fields together, non-BO fields separate
+                    var aBoGroups = [];
+                    var oBoPosMap = {};
+                    var aNonBoFields = [];
+                    aSortedFields.forEach(function (oField) {
+                        var sBo = oField._businessObjectName;
+                        if (sBo) {
+                            if (oBoPosMap[sBo] === undefined) {
+                                oBoPosMap[sBo] = aBoGroups.length;
+                                aBoGroups.push({ bo: sBo, label: oField._boGroupLabel || sBo, fields: [] });
+                            }
+                            aBoGroups[oBoPosMap[sBo]].fields.push(oField);
+                        } else {
+                            aNonBoFields.push(oField);
+                        }
+                    });
+                    // Rebuild sorted fields: non-BO fields first, then each BO group.
+                    // The empty-implicit-container whitespace that this leaves behind
+                    // when the leading non-BO fields are runtime-hidden is cleaned up
+                    // post-validation by _hideEmptyFormContainers.
+                    aSortedFields = aNonBoFields;
+                    aBoGroups.forEach(function (oGroup) {
+                        aSortedFields.push({ _boGroupTitle: oGroup.label, _isGroupSeparator: true });
+                        aSortedFields = aSortedFields.concat(oGroup.fields);
+                    });
+
+                    aSortedFields.forEach(function (oField) {
+                        // Render BO group separator title
+                        if (oField._isGroupSeparator) {
+                            var oTitle = new sap.ui.core.Title({ text: oField._boGroupTitle });
+                            aFormContent.push(oTitle);
+                            return;
+                        }
+
+                        // Determine visibility based on formVisible property from API metadata
+                        // Also hide the field if its nestedField has formVisible === false
+                        var bVisible = oField.formVisible !== false &&
+                            !(oField.nestedField && oField.nestedField.formVisible === false);
+
+                        // Sub-table fields are rendered above the form, not inside it
+                        if (oField.subTableId) {
+                            var oTable = self.createFieldControl(oField);
+                            oTable.setVisible(bVisible);
+                            var sFieldKey = oField.fieldName || oField.name;
+                            if (sFieldKey) {
+                                self._fieldControlMap[sFieldKey] = oTable;
+                            }
+                            // Track for form-level save
+                            self._subTableControls = self._subTableControls || [];
+                            self._subTableControls.push(oTable);
+                            // Wrap in a titled VBox so the field label appears above the table
+                            var oTitleLabel = new sap.m.Label({
+                                text: oField.formCaption || oField.name || oField.fieldName,
+                                required: oField.required || false
+                            });
+                            oTitleLabel.addStyleClass("sapUiSmallMarginTop");
+                            var oScrollContainer = new sap.m.ScrollContainer({
+                                horizontal: true,
+                                vertical: false,
+                                width: "100%",
+                                content: [oTable]
+                            });
+                            var oVBox = new sap.m.VBox({
+                                items: [oTitleLabel, oScrollContainer],
+                                visible: bVisible
+                            });
+                            oVBox.addStyleClass("sapUiSmallMarginBegin sapUiSmallMarginEnd sapUiSmallMarginBottom");
+                            if (sFieldKey) {
+                                self._fieldVisibilityMap[sFieldKey] = {
+                                    label: oTitleLabel,
+                                    container: oVBox
+                                };
+                            }
+                            aSubTableBlocks.push(oVBox);
+                            return; // skip adding to aFormContent
+                        }
+
+                        // Add label with comments as tooltip
+                        var oLabel = new sap.m.Label({
+                            text: oField.formCaption || oField.name || oField.fieldName,
+                            required: oField.required && Number(oField.fieldTypeId) !== 5 || false,
+                            visible: bVisible
+                        });
+                        if (oField.comments) {
+                            oLabel.setTooltip(oField.comments);
+                            oLabel.addEventDelegate({
+                                onAfterRendering: function () {
+                                    oLabel.$().attr("title", oField.comments);
+                                }
+                            });
+                        }
+                        aFormContent.push(oLabel);
+
+                        // Add input field based on field type
+                        var oInput = self.createFieldControl(oField);
+                        oInput.setVisible(bVisible);
+                        // Store reference for later data population
+                        var sFieldKey = oField.fieldName || oField.name;
+                        if (sFieldKey) {
+                            if (oField._businessObjectName) {
+                                // BO-scoped field: register in BO maps only.
+                                // Do NOT overwrite a non-BO control already stored under the same key
+                                // (e.g. "Generic_Material" exists as both a plain lookup field and an
+                                // LT_-expanded cascade field — the plain one must stay in _fieldControlMap).
+                                self._fieldBusinessObjectMap[sFieldKey] = oField._businessObjectName;
+                                if (!self._boScopedControlMap[oField._businessObjectName]) {
+                                    self._boScopedControlMap[oField._businessObjectName] = {};
+                                }
+                                self._boScopedControlMap[oField._businessObjectName][sFieldKey] = oInput;
+                                if (!self._fieldControlMap[sFieldKey]) {
+                                    self._fieldControlMap[sFieldKey] = oInput;
+                                    self._fieldVisibilityMap[sFieldKey] = { label: oLabel, container: oInput };
+                                }
+                            } else {
+                                self._fieldControlMap[sFieldKey] = oInput;
+                                self._fieldVisibilityMap[sFieldKey] = {
+                                    label: oLabel,
+                                    container: oInput
+                                };
+                            }
+                            // Register as a colour field only when the metadata explicitly
+                            // marks it (editorTypeId 16). The name-pattern fallback was
+                            // removed because plain integer fields like "Colour Number"
+                            // were being incorrectly painted as a colour swatch.
+                            if (Number(oField.editorTypeId) === 16) {
+                                self._colourInputMap[sFieldKey] = oInput;
+                            }
+                            // Fields that store numeric IDs or calculated numbers must
+                            // never be treated as TColor codes during population
+                            if (Number(oField.fieldTypeId) === 40 || Number(oField.fieldTypeId) === 18) {
+                                self._skipColorFields = self._skipColorFields || {};
+                                self._skipColorFields[sFieldKey] = true;
+                            }
+                            // Track calculated fields (fieldTypeId 40). The validation
+                            // response omits calc fields whose computed value is null
+                            // (e.g. "Function A + B" / "Numeric to Whole Number" when
+                            // their numeric inputs are cleared). Without this map we
+                            // can't tell the difference between "backend left it alone"
+                            // and "backend computed null but didn't echo" — the
+                            // post-apply step uses this map to clear stale calc values.
+                            if (Number(oField.fieldTypeId) === 40) {
+                                self._calculatedFieldKeys = self._calculatedFieldKeys || {};
+                                self._calculatedFieldKeys[sFieldKey] = true;
+                            }
+                            // Track editorTypeId for the populate-path TColor heuristic
+                            // (lets us exclude plain integer entry fields like Colour_Number).
+                            self._fieldEditorTypeMap = self._fieldEditorTypeMap || {};
+                            self._fieldEditorTypeMap[sFieldKey] = Number(oField.editorTypeId);
+                            // Track fieldTypeId so the populate-path can apply the client's
+                            // whole-number display rule: keep colour-picker values
+                            // (fieldTypeId 3 + editorTypeId 16) untouched while stripping
+                            // redundant trailing decimals from every other numeric value.
+                            self._fieldTypeIdMap = self._fieldTypeIdMap || {};
+                            self._fieldTypeIdMap[sFieldKey] = Number(oField.fieldTypeId);
+                            // Track the field's format directive (e.g. "d0", "d2", "d10")
+                            // so both the populate-path and the input change handler can
+                            // round numeric values to the configured decimal places.
+                            // Without this, a field configured with format "d2" can show
+                            // a stored value like "4.333333" or accept user input like
+                            // "4.12333" without enforcement.
+                            if (oField.format) {
+                                self._fieldFormatMap = self._fieldFormatMap || {};
+                                self._fieldFormatMap[sFieldKey] = oField.format;
+                            } else if (oField.nestedField && oField.nestedField.format) {
+                                // For fieldTypeId 18 (nested-lookup) fields the format
+                                // directive lives on the nestedField — e.g. parent
+                                // "Measured_Internal_CGR" has no format, but its
+                                // nestedField "Applied_Internal_CGR" has "d2". Without
+                                // this fallback the parent shows raw backend precision
+                                // ("4.37065304627105") instead of the configured "4.37".
+                                self._fieldFormatMap = self._fieldFormatMap || {};
+                                self._fieldFormatMap[sFieldKey] = oField.nestedField.format;
+                            }
+                        }
+
+                        // Attach a change handler that enforces the format directive on
+                        // user input — if the field is configured with format "d2" and
+                        // the user types "4.12333", the value is rounded to "4.12" on
+                        // blur. Uses attachChange (not attachLiveChange) so we don't
+                        // fight the user mid-typing. Sentinel formats like
+                        // "d2147483647" (max int — "show as-is") and other shapes
+                        // ("s-1" scientific, "d-1") fall through unchanged.
+                        if (oField.format && oInput && oInput.attachChange) {
+                            var oInputFormatMatch = /^d(\d+)$/i.exec(oField.format);
+                            if (oInputFormatMatch) {
+                                var iInputFormatDecimals = parseInt(oInputFormatMatch[1], 10);
+                                if (iInputFormatDecimals >= 0 && iInputFormatDecimals <= 20) {
+                                    (function (oCtrl, iDec) {
+                                        oCtrl.attachChange(function () {
+                                            var sCurrent = oCtrl.getValue();
+                                            if (!sCurrent) { return; }
+                                            var fParsed = parseFloat(sCurrent);
+                                            if (isNaN(fParsed) || !Number.isFinite(fParsed)) { return; }
+                                            var sFormatted = fParsed.toFixed(iDec);
+                                            if (sFormatted !== sCurrent) {
+                                                oCtrl.setValue(sFormatted);
+                                            }
+                                        });
+                                    }(oInput, iInputFormatDecimals));
+                                }
+                            }
+                        }
+
+                        // Clear validation error state (red outline / valueState) as soon
+                        (function (oCtrl) {
+                            var fnClear = function () { self._clearControlError(oCtrl); };
+                            if (oCtrl.attachLiveChange) {
+                                oCtrl.attachLiveChange(fnClear);
+                            }
+                            if (oCtrl.attachChange) {
+                                oCtrl.attachChange(fnClear);
+                            }
+                        }(oInput));
+
+                        // Check if field has a unitId — add unit symbol link
+                        var bHasUnit = oField.unitId !== undefined && oField.unitId !== null;
+                        var oUnitLink = null;
+                        if (bHasUnit) {
+                            var oUnitInfo = self._getUnitInfoForField(oField.unitId);
+                            if (oUnitInfo && oUnitInfo.symbol) {
+                                // Ensure preference map is built from Unit_Item + Unit cross-reference
+                                self._ensureUserPreferredUnitMap();
+                                // Check for user preferred unit for this unit type
+                                var iPreferredUnitId = self._oUserPreferredUnitByType
+                                    ? self._oUserPreferredUnitByType[Number(oUnitInfo.utId)]
+                                    : null;
+                                var sDisplaySymbol = oUnitInfo.symbol;
+                                // Get the field's own unit gradient/constant (for back-conversion to reference)
+                                var oFieldUnit = self._aUnitData.find(function (oU) {
+                                    return Number(oU.Unit_ID) === Number(oField.unitId);
+                                });
+                                var fFieldGradient = oFieldUnit ? (parseFloat(oFieldUnit.Gradient) || 1) : 1;
+                                var fFieldConstant = oFieldUnit ? (parseFloat(oFieldUnit.Constant) || 0) : 0;
+                                // Initially, the display unit = field's own unit
+                                var fInitGradient = fFieldGradient;
+                                var fInitConstant = fFieldConstant;
+
+                                if (iPreferredUnitId !== null && iPreferredUnitId !== undefined) {
+                                    var oPreferredUnit = self._aUnitData.find(function (oU) {
+                                        return Number(oU.Unit_ID) === Number(iPreferredUnitId) && Number(oU.UT_ID) === Number(oUnitInfo.utId);
+                                    });
+                                    if (oPreferredUnit) {
+                                        sDisplaySymbol = oPreferredUnit.Symbol || sDisplaySymbol;
+                                        fInitGradient = parseFloat(oPreferredUnit.Gradient) || 1;
+                                        fInitConstant = parseFloat(oPreferredUnit.Constant) || 0;
+                                    }
+                                }
+
+                                oUnitLink = new Link({
+                                    text: sDisplaySymbol,
+                                    press: self._onUnitSymbolPress.bind(self, sFieldKey, oField.unitId)
+                                });
+                                oUnitLink.addStyleClass("uomUnitLink");
+                                // Store link reference and current unit info for later updates
+                                self._unitLinkMap[sFieldKey] = oUnitLink;
+                                self._unitFieldInfo[sFieldKey] = {
+                                    unitId: oField.unitId,
+                                    defaultSymbol: oUnitInfo.symbol,
+                                    currentSymbol: sDisplaySymbol,
+                                    currentGradient: fInitGradient,
+                                    currentConstant: fInitConstant,
+                                    fieldGradient: fFieldGradient,
+                                    fieldConstant: fFieldConstant
+                                };
+                            }
+                        }
+
+                        if (Number(oField.fieldTypeId) == 40 && !oField.subTableId) {
+                            // Create Button
+                            var oButton = new sap.m.Button({
+                                text: "ƒ",
+                                press: self._onFieldImageButtonPress.bind(self, sFieldKey)
+                            });
+                            oButton.addStyleClass("italicButton");
+
+                            // Input fills remaining space; button and unit link stay compact
+                            // Reset input visibility to true — the HBox controls overall visibility
+                            oInput.setVisible(true);
+                            oInput.setLayoutData(new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1, minWidth: "0" }));
+                            oButton.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                            var aHBoxItems = [oInput, oButton];
+                            if (oUnitLink) {
+                                oUnitLink.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                                aHBoxItems.push(oUnitLink);
+                            }
+
+                            var oHBox = new sap.m.HBox({
+                                items: aHBoxItems,
+                                renderType: "Bare",
+                                alignItems: "Center",
+                                width: "100%",
+                                visible: bVisible
+                            });
+                            if (sFieldKey) {
+                                self._fieldVisibilityMap[sFieldKey].container = oHBox;
+                            }
+                            aFormContent.push(oHBox);
+                        }
+                        else if (Number(oField.fieldTypeId) == 18) {
+                            // Create ƒ(p) button for global table lookup fields (fieldTypeId 18 only)
+                            var oGlobalBtn = new sap.m.Button({
+                                text: "ƒ(p)",
+                                press: self._onGlobalTableInfoPress.bind(self, oField)
+                            });
+                            oGlobalBtn.addStyleClass("italicButton");
+
+                            // Disable the form field for fieldTypeId 18 (value set via ƒ(p) lookup)
+                            oInput.setEnabled(false);
+
+                            // HBox controls overall visibility; reset inner input so it stays
+                            // rendered when updateStates later flips a hidden field visible.
+                            oInput.setVisible(true);
+                            oInput.setLayoutData(new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1, minWidth: "0" }));
+                            oGlobalBtn.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                            var aHBoxItems = [oInput, oGlobalBtn];
+                            if (oUnitLink) {
+                                oUnitLink.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                                aHBoxItems.push(oUnitLink);
+                            }
+
+                            var oHBox = new sap.m.HBox({
+                                items: aHBoxItems,
+                                renderType: "Bare",
+                                alignItems: "Center",
+                                width: "100%",
+                                visible: bVisible
+                            });
+                            if (sFieldKey) {
+                                self._fieldVisibilityMap[sFieldKey].container = oHBox;
+                            }
+                            aFormContent.push(oHBox);
+                        }
+                        else if (Number(oField.fieldTypeId) == 42) {
+                            // Create ƒ(n) button for global table lookup fields
+                            var oGlobalNBtn = new sap.m.Button({
+                                text: "ƒ(n)",
+                                press: self._onGlobalTableInfoPress.bind(self, oField)
+                            });
+                            oGlobalNBtn.addStyleClass("italicButton");
+
+                            // HBox controls overall visibility; reset inner input so it stays
+                            // rendered when updateStates later flips a hidden field visible.
+                            oInput.setVisible(true);
+                            oInput.setLayoutData(new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1, minWidth: "0" }));
+                            oGlobalNBtn.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                            var aHBoxItems = [oInput, oGlobalNBtn];
+                            if (oUnitLink) {
+                                oUnitLink.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                                aHBoxItems.push(oUnitLink);
+                            }
+
+                            var oHBox = new sap.m.HBox({
+                                items: aHBoxItems,
+                                renderType: "Bare",
+                                alignItems: "Center",
+                                width: "100%",
+                                visible: bVisible
+                            });
+                            if (sFieldKey) {
+                                self._fieldVisibilityMap[sFieldKey].container = oHBox;
+                            }
+                            aFormContent.push(oHBox);
+                        }
+                        else if (oUnitLink) {
+                            // Input fills remaining space; unit link stays compact on the right.
+                            // HBox carries the visibility — reset oInput so it stays rendered
+                            // when updateStates later flips a hidden field visible.
+                            oInput.setVisible(true);
+                            oInput.setLayoutData(new sap.m.FlexItemData({ growFactor: 1, shrinkFactor: 1, minWidth: "0" }));
+                            oUnitLink.setLayoutData(new sap.m.FlexItemData({ growFactor: 0, shrinkFactor: 0 }));
+                            var oHBox = new sap.m.HBox({
+                                items: [oInput, oUnitLink],
+                                renderType: "Bare",
+                                alignItems: "Center",
+                                width: "100%",
+                                visible: bVisible
+                            });
+                            if (sFieldKey) {
+                                self._fieldVisibilityMap[sFieldKey].container = oHBox;
+                            }
+                            aFormContent.push(oHBox);
+                        }
+                        else
+                            aFormContent.push(oInput);
+                    });
+                } else {
+                    // No fields for this category
+                    aFormContent.push(
+                        new sap.m.Text({
+                            text: self.getResourceBundle().getText("msgNoFieldsForCategory"),
+                            class: "sapUiMediumMargin"
+                        })
+                    );
+                }
+
+                // Force single-column layout so BO-group FormContainers always stack
+                // vertically and stay left-aligned. The default ResponsiveGridLayout
+                // (columnsL=2) tiles FormContainers across two grid slots; when any
+                // preceding container ends up empty — either from metadata-hidden fields
+                // or from runtime visibility rules (e.g. "Visible for Valve Asset Type"
+                // categories) — the next BO group is pushed into the right column with
+                // empty space on the left.
+                var oSimpleForm = new sap.ui.layout.form.SimpleForm({
+                    editable: true,
+                    layout: "ResponsiveGridLayout",
+                    columnsXL: 1,
+                    columnsL: 1,
+                    columnsM: 1,
+                    content: aFormContent
+                });
+                // Register so _hideEmptyFormContainers can walk this form post-validation
+                // and hide any FormContainer whose elements all turned invisible.
+                self._simpleForms.push(oSimpleForm);
+
+                // Build scroll content: optional comment text, then sub-tables, then the form
+                var aScrollContent = [];
+                if (oCategory.comments) {
+                    var oCommentText = new sap.m.Text({
+                        text: oCategory.comments,
+                        wrapping: true
+                    });
+                    oCommentText.addStyleClass("sapUiSmallMarginBegin sapUiSmallMarginEnd sapUiSmallMarginTop sapUiSmallMarginBottom");
+                    aScrollContent.push(oCommentText);
+                }
+                // Sub-tables appear above the form fields
+                aSubTableBlocks.forEach(function (oBlock) {
+                    aScrollContent.push(oBlock);
+                });
+                aScrollContent.push(oSimpleForm);
+
+                // Create ScrollContainer for the form
+                var oScrollContainer = new sap.m.ScrollContainer({
+                    vertical: true,
+                    horizontal: true,
+                    height: "100%",
+                    content: aScrollContent
+                });
+
+                // Create tab for this category
+                var oTab = new sap.m.IconTabFilter({
+                    text: oCategory.name,
+                    key: "tab" + iIndex,
+                    content: [oScrollContainer]
+                });
+
+                // Store reference so we can show/hide after validation
+                self._categoryTabMap[oCategory.name] = oTab;
+                oTabBar.addItem(oTab);
+            });
+
+            // Always select the first tab after building all tabs
+            var aItems = oTabBar.getItems();
+            if (aItems.length > 0) {
+                oTabBar.setSelectedKey(aItems[0].getKey());
+            }
+        },
+        createFieldControl: function (oField) {
+            // If field has a subTableId, create an sap.m.Table and load columns from boByKey
+            if (oField.subTableId) {
+                this._pendingLookupCount++;
+                var oTable = new sap.m.Table({
+                    growing: true,
+                    growingScrollToLoad: true,
+                    noDataText: "No data",
+                    autoPopinMode: false,
+                    fixedLayout: true
+                });
+                this._loadSubTableColumns(oTable, oField.subTableId, oField.category);
+                return oTable;
+            }
+
+            // If field has a lookupListId, always create a Select and load lookup items
+            if (oField.lookupListId) {
+                this._pendingLookupCount++;
+                var oSelect = new sap.m.Select({ width: "100%", forceSelection: false });
+                this._loadLookupItems(oSelect, oField.lookupListId);
+                return oSelect;
+            }
+
+            // Editable colour picker — non-calculated fields with editorTypeId 16
+            // (e.g. fieldTypeId 3 + editorTypeId 16). Calculated colours (fieldTypeId 40)
+            // continue down to the disabled-Input branch in case 40.
+            if (Number(oField.editorTypeId) === 16 && Number(oField.fieldTypeId) !== 40) {
+                var self = this;
+                var oColourInput = new sap.m.Input({
+                    showValueHelp: true,
+                    valueHelpOnly: true,
+                    valueHelpIconSrc: "sap-icon://palette"
+                });
+                oColourInput.attachValueHelpRequest(function (oEvent) {
+                    var oCtrl = oEvent.getSource();
+                    var sFieldKeyLocal = oField.fieldName || oField.name;
+                    sap.ui.require(["sap/m/ColorPalettePopover"], function (ColorPalettePopover) {
+                        var oPopover = new ColorPalettePopover({
+                            // Hide "Default Colour" button — its value is "transparent",
+                            // which can't be encoded as a TColor and lands as 0 in the input.
+                            showDefaultColorButton: false,
+                            colorSelect: function (oEv) {
+                                var sRaw = String(oEv.getParameter("value") || "").trim();
+                                if (!sRaw || sRaw === "transparent") { return; }
+                                // Popover may emit hex (#FFFF00), shorthand (#FF0), or
+                                // a CSS named colour (e.g. "yellow"). Normalise to #RRGGBB.
+                                var sHex = self._resolveCssColorToHex(sRaw);
+                                if (!sHex) { return; }
+                                var iTColor = self._cssHexToTcolor(sHex);
+                                oCtrl.setValue(String(iTColor));
+                                if (self._colourValueMap) { self._colourValueMap[sFieldKeyLocal] = sHex; }
+                                var oInner = oCtrl.getDomRef("inner");
+                                if (oInner) {
+                                    oInner.style.backgroundColor = sHex;
+                                    oInner.style.color = "transparent";
+                                }
+                                oCtrl.fireChange({ value: String(iTColor) });
+                            }
+                        });
+                        oPopover.openBy(oCtrl);
+                    });
+                });
+                return oColourInput;
+            }
+
+            // Create appropriate control based on field type
+            switch (oField.fieldTypeId) {
+                case 9: // Date field
+                    var oDatePicker = new sap.m.DatePicker({
+                        displayFormat: "dd/MM/yyyy",
+                        showWeekNumbers: false,
+                        placeholder: oField.blankText || ""
+                    });
+                    this._makeDatePickerOnly(oDatePicker);
+                    return oDatePicker;
+                case 10: // Time field
+                    return new sap.m.TimePicker({
+                        displayFormat: "hh:mm:ss a",
+                        valueFormat: "HH:mm:ss",
+                        width: "100%",
+                        placeholder: oField.blankText || ""
+                    });
+                case 11: // Date and Time field
+                    return new sap.m.DateTimePicker({
+                        displayFormat: "dd MMM yyyy HH:mm:ss",
+                        showWeekNumbers: false,
+                        width: "100%",
+                        placeholder: oField.blankText || ""
+                    });
+                case 5: // Boolean field
+                    return new sap.m.CheckBox({
+                        text: ""
+                    });
+                case 3: // Integer / Whole number field (no decimals)
+                    var oIntInput = new sap.m.Input({
+                        type: "Number",
+                        placeholder: oField.blankText || "",
+                        liveChange: function (oEvent) {
+                            var oInput = oEvent.getSource();
+                            var sVal = oInput.getValue();
+                            // Strip decimals and any non-integer characters (allow leading minus)
+                            var sClean = sVal.replace(/[^0-9\-]/g, "").replace(/(?!^)-/g, "");
+                            if (sVal !== sClean) {
+                                oInput.setValue(sClean);
+                            }
+                        }
+                    });
+                    oIntInput.addEventDelegate({
+                        onkeydown: function (oEvent) {
+                            // Block decimal point keys: . (190), numpad . (110), , (188)
+                            if (oEvent.key === "." || oEvent.key === "," ||
+                                oEvent.keyCode === 190 || oEvent.keyCode === 110 || oEvent.keyCode === 188) {
+                                oEvent.preventDefault();
+                            }
+                        }
+                    });
+                    return oIntInput;
+                case 6: // Numeric field
+                    return new sap.m.Input({
+                        type: "Number",
+                        placeholder: oField.blankText || ""
+                    });
+                case 16: // Multi-line text field
+                    return new sap.m.TextArea({
+                        growing: true,
+                        growingMaxLines: 6,
+                        width: "100%",
+                        placeholder: oField.blankText || ""
+                    });
+                case 37: // Editable dropdown field (ComboBox)
+                    var oSelect = new sap.m.ComboBox({
+                        width: "100%",
+                        placeholder: oField.blankText || ""
+                    });
+                    this._makeComboBoxSelectOnly(oSelect);
+                    return oSelect;
+                case 40: // Calculated field — render based on editorTypeId / displayFieldTypeId
+                    if (Number(oField.editorTypeId) === 12) {
+                        return new sap.m.TextArea({
+                            enabled: false,
+                            growing: true,
+                            growingMaxLines: 6,
+                            width: "100%",
+                            placeholder: oField.blankText || ""
+                        });
+                    }
+                    if (Number(oField.editorTypeId) === 11) {
+                        // Pick the read-only control that matches the underlying display type
+                        switch (Number(oField.displayFieldTypeId)) {
+                            case 9: // Date
+                                var oCalcDatePicker = new sap.m.DatePicker({
+                                    displayFormat: "dd/MM/yyyy",
+                                    showWeekNumbers: false,
+                                    enabled: false,
+                                    placeholder: oField.blankText || ""
+                                });
+                                this._makeDatePickerOnly(oCalcDatePicker);
+                                return oCalcDatePicker;
+                            case 11: // DateTime — calculated date+time values (e.g. Last Sensor Reading, Next Scheduled Reading)
+                                return new sap.m.DateTimePicker({
+                                    displayFormat: "dd/MM/yyyy HH:mm:ss",
+                                    showWeekNumbers: false,
+                                    enabled: false,
+                                    placeholder: oField.blankText || ""
+                                });
+                            case 5: // Boolean — display as Yes/No text (matches legacy IC Web)
+                                var oCalcBoolInput = new sap.m.Input({
+                                    enabled: false,
+                                    placeholder: oField.blankText || ""
+                                });
+                                oCalcBoolInput.data("calcBoolean", true);
+                                return oCalcBoolInput;
+                            case 1:  // String — calculated text values (e.g. Traffic Light Status)
+                            case 16: // TColor / coloured-text — calculated value is a string (e.g. "Medium", "High")
+                                return new sap.m.Input({
+                                    type: "Text",
+                                    enabled: false,
+                                    placeholder: oField.blankText || ""
+                                });
+                            default:
+                                return new sap.m.Input({
+                                    type: "Number",
+                                    enabled: false,
+                                    placeholder: oField.blankText || ""
+                                });
+                        }
+                    }
+                    return new sap.m.Input({
+                        enabled: false,
+                        placeholder: oField.blankText || ""
+                    });
+                case 18: // Nested lookup or sub-table
+                    if (oField.nestedField && oField.nestedField.lookupListId) {
+                        this._nestedLookupFieldMap = this._nestedLookupFieldMap || {};
+                        this._nestedLookupFieldMap[oField.fieldName] = oField.nestedField.lookupListId;
+                    } else if (oField.nestedField && oField.nestedField.foreignTableId &&
+                        oField.nestedField.nestedField && oField.nestedField.nestedField.businessObjectName) {
+                        this._nestedForeignKeyFieldMap = this._nestedForeignKeyFieldMap || {};
+                        this._nestedForeignKeyFieldMap[oField.fieldName] = {
+                            businessObjectName: oField.nestedField.nestedField.businessObjectName,
+                            displayFieldName: oField.nestedField.nestedField.fieldName || "Name"
+                        };
+                    }
+                    return new sap.m.Input({
+                        enabled: false,
+                        placeholder: oField.blankText || ""
+                    });
+                case 42: // Sub-table
+                    return new sap.m.Input({
+                        enabled: false,
+                        placeholder: oField.blankText || ""
+                    });
+                case 57: // Global table look
+                    var oSelect = new sap.m.Select({
+                        width: "100%"
+                    });
+                    return oSelect;
+                default: // Text field
+                    return new sap.m.Input({
+                        type: "Text",
+                        placeholder: oField.blankText || ""
+                    });
+            }
+        },
+        _loadLookupItems: function (oSelect, sLookupListId) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            var self = this;
+
+            var fnFetch = function (sResolvedHash) {
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/Lookup_Item/",
+                    "method": "GET",
+                    "dataType": "json",
+                    "headers": {
+                        "X-NEXUS-Filter": JSON.stringify({ "where": [{ "field": "LL_ID", "method": "eq", "value": sLookupListId }] })
+                    },
+                    "data": {
+                        "hash": sResolvedHash,
+                        "pageSize": 10000
+                    },
+                    "success": function (response) {
+                        var aItems = Array.isArray(response && response.rows) ? response.rows : [];
+                        // Sort by Item_Order if present, otherwise preserve server order
+                        var bHasItemOrder = aItems.some(function (oItem) {
+                            return oItem.Item_Order !== undefined && oItem.Item_Order !== null;
+                        });
+                        if (bHasItemOrder) {
+                            aItems.sort(function (a, b) {
+                                return (a.Item_Order || 0) - (b.Item_Order || 0);
+                            });
+                        }
+                        oSelect.removeAllItems();
+                        // Add empty option as first item so users can clear the selection
+                        oSelect.addItem(new Item({ key: "", text: "" }));
+                        aItems.forEach(function (oItem) {
+                            // Use LI_ID as the key (internal identifier stored in database)
+                            var sKey = (oItem.LI_ID !== undefined && oItem.LI_ID !== null)
+                                ? String(oItem.LI_ID) : String(oItem.Value || "");
+                            var sText = String(oItem.Comments || oItem.Value || "");
+                            oSelect.addItem(new Item({
+                                key: sKey,
+                                text: sText
+                            }));
+                        });
+
+                        // After items are loaded, apply any pending value selection
+                        self._applyPendingComboBoxValues();
+
+                        // Decrement pending lookup count
+                        self._pendingLookupCount--;
+
+                        // If all lookups are done, load form data
+                        if (self._pendingLookupCount === 0 && self._formDataTableName) {
+                            self._loadFormData(self._formDataTableName);
+                        }
+                    },
+                    "error": function () {
+                        MessageToast.show(self.getResourceBundle().getText("msgErrorLoadingLookupItems"));
+
+                        // Decrement pending lookup count even on error
+                        self._pendingLookupCount--;
+
+                        // If all lookups are done (or failed), load form data
+                        if (self._pendingLookupCount === 0 && self._formDataTableName) {
+                            self._loadFormData(self._formDataTableName);
+                        }
+                    }
+                });
+            };
+
+            if (sHash) {
+                fnFetch(sHash);
+                return;
+            }
+
+            this.getoHashToken().done(function (oResult) {
+                var sFetchedHash = oResult && oResult.hash;
+                if (sFetchedHash) {
+                    fnFetch(sFetchedHash);
+                }
+            });
+        },
+        /**
+         * For every field registered in _nestedLookupFieldMap (fieldTypeId 18 whose
+         * nestedField carries a lookupListId), fetch the matching Lookup_Item record
+         * using the raw ID stored in oRecord and display its Value text on the control.
+         */
+        _resolveNestedLookupFields: function (oRecord, sHash) { // need to check
+            var self = this;
+            if (!this._nestedLookupFieldMap || !oRecord) {
+                return;
+            }
+            Object.keys(this._nestedLookupFieldMap).forEach(function (sFieldKey) {
+                var vFieldValue = oRecord[sFieldKey];
+                if (vFieldValue === undefined || vFieldValue === null || vFieldValue === "") {
+                    return;
+                }
+                // Extract LI_ID in case the API returned an expanded object
+                var vLiId = (vFieldValue !== null && typeof vFieldValue === "object")
+                    ? (vFieldValue.LI_ID !== undefined ? vFieldValue.LI_ID : vFieldValue)
+                    : vFieldValue;
+                var sLookupListId = self._nestedLookupFieldMap[sFieldKey];
+                // Filter by both LL_ID (list scope) and LI_ID (item ID) for accurate resolution
+                var aWhere = [{ "field": "LI_ID", "method": "eq", "value": vLiId }];
+                if (sLookupListId !== undefined && sLookupListId !== null) {
+                    aWhere.unshift({ "field": "LL_ID", "method": "eq", "value": sLookupListId });
+                }
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/Lookup_Item/",
+                    "method": "GET",
+                    "dataType": "json",
+                    "headers": {
+                        "X-NEXUS-Filter": JSON.stringify({ "where": aWhere })
+                    },
+                    "data": {
+                        "hash": sHash
+                    },
+                    "success": function (response) {
+                        var aRows = Array.isArray(response && response.rows) ? response.rows
+                            : Array.isArray(response) ? response : [];
+                        var oControl = self._fieldControlMap && self._fieldControlMap[sFieldKey];
+                        if (!oControl || !oControl.isA("sap.m.Input")) {
+                            return;
+                        }
+                        if (aRows.length > 0) {
+                            var sDisplayValue = String(aRows[0].Comments || aRows[0].Value || aRows[0].Name || vLiId);
+                            oControl.setValue(sDisplayValue);
+                        } else {
+                            // Fallback: show raw value when no matching lookup item found
+                            oControl.setValue(String(vLiId));
+                        }
+                    },
+                    "error": function () {
+                        // Silent fallback – display raw stored value
+                        var oControl = self._fieldControlMap && self._fieldControlMap[sFieldKey];
+                        if (oControl && oControl.isA("sap.m.Input")) {
+                            oControl.setValue(String(vLiId));
+                        }
+                    }
+                });
+            });
+            // Resolve fields backed by nestedField.foreignTableId + nestedField.nestedField.businessObjectName
+            // Calls /bo/{businessObjectName}/{value} and displays the nestedField.nestedField.fieldName value
+            if (this._nestedForeignKeyFieldMap) {
+                Object.keys(this._nestedForeignKeyFieldMap).forEach(function (sFieldKey) {
+                    var oFieldInfo = self._nestedForeignKeyFieldMap[sFieldKey];
+                    var vFieldValue = oRecord[sFieldKey];
+                    if (vFieldValue === undefined || vFieldValue === null || vFieldValue === "") {
+                        return;
+                    }
+                    $.ajax({
+                        "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(oFieldInfo.businessObjectName) + "/" + encodeURIComponent(vFieldValue),
+                        "method": "GET",
+                        "dataType": "json",
+                        "data": { "hash": sHash },
+                        "success": function (response) {
+                            var oRow = response;
+                            if (Array.isArray(response && response.rows) && response.rows.length > 0) {
+                                oRow = response.rows[0];
+                            } else if (Array.isArray(response) && response.length > 0) {
+                                oRow = response[0];
+                            }
+                            var oControl = self._fieldControlMap && self._fieldControlMap[sFieldKey];
+                            if (!oControl || !oControl.isA("sap.m.Input")) {
+                                return;
+                            }
+                            var sDisplayValue = oRow && (oRow[oFieldInfo.displayFieldName] || oRow.Name);
+                            oControl.setValue(sDisplayValue ? String(sDisplayValue) : String(vFieldValue));
+                        },
+                        "error": function () {
+                            var oControl = self._fieldControlMap && self._fieldControlMap[sFieldKey];
+                            if (oControl && oControl.isA("sap.m.Input")) {
+                                oControl.setValue(String(vFieldValue));
+                            }
+                        }
+                    });
+                });
+            }
+        },
+        _getSubTableColumnWidth: function (oColField) {
+            // Type-based minimum so date/numeric inputs render comfortably
+            var iTypeMin;
+            if (oColField && oColField.lookupListId) {
+                iTypeMin = 12;
+            } else {
+                switch (Number(oColField && oColField.fieldTypeId)) {
+                    case 5:  iTypeMin = 7;  break; // Boolean
+                    case 9:  iTypeMin = 11; break; // Date
+                    case 10: iTypeMin = 10; break; // Time
+                    case 11: iTypeMin = 14; break; // DateTime
+                    case 3:
+                    case 6:  iTypeMin = 9;  break; // Integer / Numeric
+                    case 16: iTypeMin = 20; break; // Multi-line text
+                    case 18:
+                    case 37:
+                    case 42:
+                    case 57: iTypeMin = 12; break; // Lookups / sub-table refs
+                    default: iTypeMin = 12;        // Plain text
+                }
+            }
+            // Header-driven width: ensure the column is wide enough to show the
+            // full header text without truncation. ~0.62rem per char + buffer
+            // for cell padding, sort/filter icons.
+            var sHeader = ((oColField && (oColField.name || oColField.fieldName)) || "").toString();
+            var iHeaderRem = Math.ceil(sHeader.length * 0.62) + 3;
+            // Long-text heuristic: description/comment/notes-style fields commonly
+            // hold values much longer than their header, so reserve more space.
+            if (/description|comment|notes?|remark|details|summary|reason|justification/i.test(sHeader)) {
+                iTypeMin = Math.max(iTypeMin, 25);
+            }
+            var iWidth = Math.max(iTypeMin, iHeaderRem);
+            return iWidth + "rem";
+        },
+        _adjustSubTableColumnWidths: function (oTable, aVisibleFields, aRows) {
+            if (!oTable || !aVisibleFields || !aRows || !aRows.length) { return; }
+            var aColumns = oTable.getColumns();
+            // Cap so a single huge value doesn't blow out the layout
+            var iMaxRem = 40;
+            aVisibleFields.forEach(function (oColField, iColIdx) {
+                var oColumn = aColumns[iColIdx];
+                if (!oColumn) { return; }
+                var sFieldKey = oColField.fieldName || oColField.name;
+                var iMaxLen = 0;
+                aRows.forEach(function (oRow) {
+                    var v = oRow[sFieldKey];
+                    if (v !== null && v !== undefined && typeof v !== "object") {
+                        var iLen = String(v).length;
+                        if (iLen > iMaxLen) { iMaxLen = iLen; }
+                    }
+                });
+                if (iMaxLen === 0) { return; }
+                var iCurrentRem = parseFloat(oColumn.getWidth()) || 0;
+                var iContentRem = Math.min(iMaxRem, Math.ceil(iMaxLen * 0.62) + 3);
+                if (iContentRem > iCurrentRem) {
+                    oColumn.setWidth(iContentRem + "rem");
+                }
+            });
+        },
+        _loadSubTableColumns: function (oTable, sSubTableId, sFieldName) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            var self = this;
+            var fnFetch = function (sResolvedHash) {
+                $.ajax({
+                    "url": self.isRunninglocally() + "/boByKey/" + encodeURIComponent(sSubTableId),
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": {
+                        "hash": sResolvedHash
+                    },
+                    "success": function (response) {
+                        var aFields = Array.isArray(response && response.fields) ? response.fields : [];
+                        // Only include fields where gridVisible is not explicitly false
+                        // and where the nestedField (if present) does not have formVisible === false
+                        var aVisibleFields = aFields.filter(function (oColField) {
+                            if (oColField.gridVisible === false) { return false; }
+                            if (oColField.nestedField && oColField.nestedField.formVisible === false) { return false; }
+                            return true;
+                        });
+                        // Sort columns by gridOrder if present
+                        var bHasGridOrder = aVisibleFields.some(function (oColField) {
+                            return oColField.gridOrder !== undefined && oColField.gridOrder !== null;
+                        });
+                        if (bHasGridOrder) {
+                            aVisibleFields.sort(function (a, b) {
+                                return (a.gridOrder || 0) - (b.gridOrder || 0);
+                            });
+                        }
+                        aVisibleFields.forEach(function (oColField) {
+                            var sColName = oColField.name || oColField.fieldName || "";
+                            oTable.addColumn(new sap.m.Column({
+                                demandPopin: false,
+                                width: self._getSubTableColumnWidth(oColField),
+                                header: new sap.m.Text({ text: sColName, wrapping: false })
+                            }));
+                        });
+                        // Store only visible field metadata so row cells align with columns
+                        oTable.data("subTableFields", aVisibleFields);
+
+                        // Use the field's own fieldName from the parent form as the category name.
+                        // response.name is a display name (may have spaces) and should not be used
+                        // as the /bo/ API path segment.
+                        // boByKey returns businessObjectName (not tableName) as the BO API path segment.
+                        var sCategoryName = response.tableName || response.businessObjectName || "";
+                        oTable.data("subTableName", sCategoryName);
+
+                        // Enable row selection for delete operations
+                        oTable.setMode("MultiSelect");
+
+                        // Add toolbar with Add / Delete buttons (Save is handled by the form Save button)
+                        oTable.setHeaderToolbar(new sap.m.Toolbar({
+                            content: [
+                                new sap.m.ToolbarSpacer(),
+                                new sap.m.Button({
+                                    text: "Add",
+                                    icon: "sap-icon://add",
+                                    press: self._onSubTableAddRow.bind(self, oTable)
+                                }),
+                                new sap.m.Button({
+                                    text: "Delete",
+                                    icon: "sap-icon://delete",
+                                    press: self._onSubTableDeleteRows.bind(self, oTable, sCategoryName, sResolvedHash)
+                                })
+                            ]
+                        }));
+                        // Pre-load lookup items for every dropdown column so editable cells
+                        // can be populated before rows are rendered.
+                        var aDropdownFields = aVisibleFields.filter(function (oColField) {
+                            return !!oColField.lookupListId;
+                        });
+                        var oSubTableLookups = {};
+                        oTable.data("subTableLookups", oSubTableLookups);
+                        var fnProceedWithData = function () {
+                            if (sCategoryName) {
+                                self._loadSubTableData(oTable, sCategoryName, aVisibleFields, sResolvedHash, oSubTableLookups);
+                            }
+                            self._pendingLookupCount--;
+                            if (self._pendingLookupCount === 0 && self._formDataTableName) {
+                                self._loadFormData(self._formDataTableName);
+                            }
+                        };
+
+                        if (aDropdownFields.length === 0) {
+                            fnProceedWithData();
+                            return;
+                        }
+                        var iRemainingLookups = aDropdownFields.length;
+                        aDropdownFields.forEach(function (oColField) {
+                            var sFieldKey = oColField.fieldName || oColField.name;
+                            $.ajax({
+                                "url": self.isRunninglocally() + "/bo/Lookup_Item/",
+                                "method": "GET",
+                                "dataType": "json",
+                                "headers": {
+                                    "X-NEXUS-Filter": JSON.stringify({ "where": [{ "field": "LL_ID", "method": "eq", "value": oColField.lookupListId }] })
+                                },
+                                "data": { "hash": sResolvedHash },
+                                "success": function (resp) {
+                                    var aLookupItems = Array.isArray(resp && resp.rows) ? resp.rows : [];
+                                    // Sort by Item_Order if present, otherwise preserve server order
+                                    var bHasItemOrder = aLookupItems.some(function (oItem) {
+                                        return oItem.Item_Order !== undefined && oItem.Item_Order !== null;
+                                    });
+                                    if (bHasItemOrder) {
+                                        aLookupItems.sort(function (a, b) {
+                                            return (a.Item_Order || 0) - (b.Item_Order || 0);
+                                        });
+                                    }
+                                    oSubTableLookups[sFieldKey] = aLookupItems;
+                                    iRemainingLookups--;
+                                    if (iRemainingLookups === 0) { fnProceedWithData(); }
+                                },
+                                "error": function () {
+                                    oSubTableLookups[sFieldKey] = [];
+                                    iRemainingLookups--;
+                                    if (iRemainingLookups === 0) { fnProceedWithData(); }
+                                }
+                            });
+                        });
+                    },
+                    "error": function () {
+                        MessageToast.show(self.getResourceBundle().getText("msgErrorLoadingLookupItems"));
+                        self._pendingLookupCount--;
+                        if (self._pendingLookupCount === 0 && self._formDataTableName) {
+                            self._loadFormData(self._formDataTableName);
+                        }
+                    }
+                });
+            };
+            if (sHash) {
+                fnFetch(sHash);
+                return;
+            }
+            this.getoHashToken().done(function (oResult) {
+                var sFetchedHash = oResult && oResult.hash;
+                if (sFetchedHash) {
+                    fnFetch(sFetchedHash);
+                } else {
+                    self._pendingLookupCount--;
+                }
+            }).fail(function () {
+                self._pendingLookupCount--;
+            });
+        },
+        _loadSubTableData: function (oTable, sCategoryName, aVisibleFields, sResolvedHash, oSubTableLookups) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var sComponentId = oLocalDataModel.getProperty("/sCompoonentID");
+            var self = this;
+
+            if (!sComponentId || !sCategoryName) {
+                return;
+            }
+            $.ajax({
+                "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sCategoryName) + "/",
+                "method": "GET",
+                "dataType": "json",
+                "headers": {
+                    "x-nexus-filter": JSON.stringify({ "where": [{ "field": "Component_ID", "value": sComponentId }] })
+                },
+                "data": {
+                    "hash": sResolvedHash
+                },
+                "success": function (response) {
+                    var aRows = Array.isArray(response && response.rows) ? response.rows
+                        : (Array.isArray(response) ? response : []);
+
+                    oTable.removeAllItems();
+                    aRows.forEach(function (oRow) {
+                        var aCells = aVisibleFields.map(function (oColField) {
+                            var sCellField = oColField.fieldName || oColField.name;
+                            var vVal = oRow[sCellField];
+                            // Resolve nested display value (e.g. lookup object)
+                            if (vVal !== null && vVal !== undefined && typeof vVal === "object") {
+                                if (oColField.nestedField) {
+                                    if (oColField.lookupListId) {
+                                        // For lookup fields use Comments as the display/matching value
+                                        vVal = vVal["Comments"] || vVal[oColField.nestedField.fieldName || oColField.nestedField.name];
+                                    } else {
+                                        var sNestedKey = oColField.nestedField.fieldName || oColField.nestedField.name;
+                                        vVal = sNestedKey ? vVal[sNestedKey] : vVal;
+                                    }
+                                } else {
+                                    // No nestedField defined and value is an object – display empty
+                                    vVal = null;
+                                }
+                            }
+                            return self._createSubTableCellControl(oColField, vVal, oSubTableLookups || {});
+                        });
+                        var oItem = new sap.m.ColumnListItem({ cells: aCells });
+                        oItem.data("rowData", oRow);
+                        oTable.addItem(oItem);
+                    });
+                    self._adjustSubTableColumnWidths(oTable, aVisibleFields, aRows);
+                },
+                "error": function () {
+                    // Silent fail – table stays empty, main form load is unaffected
+                }
+            });
+        },
+        _createSubTableCellControl: function (oColField, vVal, oSubTableLookups) {
+            var sFieldKey = oColField.fieldName || oColField.name;
+            var aLookupItems = oSubTableLookups && oSubTableLookups[sFieldKey];
+
+            if (oColField.lookupListId && aLookupItems) {
+                var oSelect = new sap.m.Select({ width: "100%", autoAdjustWidth: false });
+                // Add a blank first item so nothing is pre-selected when value is absent
+                oSelect.addItem(new sap.ui.core.Item({ key: "", text: "" }));
+                // Sort by Item_Order if present, otherwise preserve server order
+                var bHasItemOrder = aLookupItems.some(function (oItem) {
+                    return oItem.Item_Order !== undefined && oItem.Item_Order !== null;
+                });
+                var aSortedLookupItems = aLookupItems.slice();
+                if (bHasItemOrder) {
+                    aSortedLookupItems.sort(function (a, b) {
+                        return (a.Item_Order || 0) - (b.Item_Order || 0);
+                    });
+                }
+                aSortedLookupItems.forEach(function (oLookupItem) {
+                    // Key = LI_ID (raw integer stored in data); Text = Comments (display label)
+                    var sKey = String(oLookupItem.LI_ID || oLookupItem.Value || "");
+                    var sText = String(oLookupItem.Comments || oLookupItem.Value || oLookupItem.Name || "");
+                    oSelect.addItem(new sap.ui.core.Item({ key: sKey, text: sText }));
+                });
+                if (vVal !== undefined && vVal !== null && vVal !== "") {
+                    oSelect.setSelectedKey(String(vVal));
+                }
+                return oSelect;
+            }
+
+            var bIsDateField = oColField.fieldTypeId === 9 ||
+                (typeof vVal === "string" && /^\d{4}-\d{2}-\d{2}/.test(vVal));
+
+            if (bIsDateField) {
+                var oDatePicker = new sap.m.DatePicker({ width: "100%", displayFormat: "dd/MM/yyyy", showWeekNumbers: false });
+                this._makeDatePickerOnly(oDatePicker);
+                if (vVal !== undefined && vVal !== null && vVal !== "") {
+                    var oParsedDate = new Date(vVal);
+                    if (!isNaN(oParsedDate.getTime())) {
+                        oDatePicker.setDateValue(oParsedDate);
+                    }
+                }
+                return oDatePicker;
+            }
+
+            return new sap.m.Input({
+                width: "100%",
+                value: (vVal !== undefined && vVal !== null) ? String(vVal) : "",
+                type: oColField.fieldTypeId === 6 ? "Number" : "Text"
+            });
+        },
+        _onSubTableAddRow: function (oTable) {
+            var aVisibleFields = oTable.data("subTableFields") || [];
+            var oSubTableLookups = oTable.data("subTableLookups") || {};
+            var self = this;
+
+            var aCells = aVisibleFields.map(function (oColField) {
+                return self._createSubTableCellControl(oColField, null, oSubTableLookups);
+            });
+
+            var oNewItem = new sap.m.ColumnListItem({ cells: aCells });
+            oNewItem.data("isNew", true);
+            oTable.addItem(oNewItem);
+        },
+        _onSubTableDeleteRows: function (oTable, sCategoryName, sHash) {
+            var aSelectedItems = oTable.getSelectedItems();
+            if (!aSelectedItems.length) {
+                MessageToast.show("Please select rows to delete");
+                return;
+            }
+            var self = this;
+            MessageBox.confirm("Delete the selected row(s)?", {
+                onClose: function (sAction) {
+                    if (sAction !== MessageBox.Action.OK) { return; }
+                    aSelectedItems.forEach(function (oItem) {
+                        var oRowData = oItem.data("rowData");
+                        var bIsNew = oItem.data("isNew");
+                        if (!bIsNew && oRowData && sCategoryName) {
+                            // Find primary key: first *_ID field that is not Component_ID
+                            var sPrimaryKey = null;
+                            Object.keys(oRowData).forEach(function (sKey) {
+                                if (!sPrimaryKey && sKey !== "Component_ID" &&
+                                    (sKey === "id" || sKey === "ID" || /[_]ID$/i.test(sKey))) {
+                                    sPrimaryKey = oRowData[sKey];
+                                }
+                            });
+                            if (sPrimaryKey !== null && sPrimaryKey !== undefined) {
+                                $.ajax({
+                                    "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sCategoryName) + "/" + encodeURIComponent(sPrimaryKey) + "?hash=" + encodeURIComponent(sHash),
+                                    "method": "DELETE",
+                                    "error": function () {
+                                        MessageToast.show("Error deleting row");
+                                    }
+                                });
+                            }
+                        }
+                        oTable.removeItem(oItem);
+                        oItem.destroy();
+                    });
+                }
+            });
+        },
+        getFieldInputType: function (oField) {
+            // Map field types to SAP UI5 input types
+            if (oField.fieldTypeId === 9) {
+                return "Date"; // Date field
+            } else if (oField.fieldTypeId === 5) {
+                return "Text"; // Boolean - would ideally be a checkbox
+            } else if (oField.fieldTypeId === 6) {
+                return "Number"; // Numeric field
+            } else {
+                return "Text"; // Default to text
+            }
+        },
+        _loadFormData: function (sTableName) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var sComponentId = oLocalDataModel.getProperty("/sCompoonentID");
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            var self = this;
+
+            if (!sComponentId) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoComponentSelected"));
+                // Turn off busy indicator if no component is selected
+                if (this._oFormDialog) {
+                    this._oFormDialog.setBusy(false);
+                }
+                return;
+            }
+            var fnFetchData = function (sResolvedHash) {
+                self.setBusyOn();
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sTableName) + "/" + encodeURIComponent(sComponentId),
+                    "method": "GET",
+                    "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sTableName) + "/" + encodeURIComponent(sComponentId),
+                    "method": "GET",
+                    "dataType": "json",
+                    "data": {
+                        "hash": sResolvedHash
+                    },
+                    "success": function (response) {
+                        self._populateFormFields(response);
+                        // Extract Component_ID and record for validation
+                        var oRecord = response;
+                        if (Array.isArray(response.rows) && response.rows.length > 0) {
+                            oRecord = response.rows[0];
+                        } else if (Array.isArray(response) && response.length > 0) {
+                            oRecord = response[0];
+                        }
+                        // Apply saved values to BO-scoped Select fields (after _populateFormFields which skips them)
+                        // This function now aggressively clears Select fields when parent field is null
+                        self._applyBoScopedFieldValues(oRecord);
+                        
+                        // Resolve display text for fields with nestedField.lookupListId
+                        self._resolveNestedLookupFields(oRecord, sResolvedHash);
+                        var sComponentId = oRecord && oRecord.Component_ID;
+                        if (sComponentId) {
+                            // Make validation POST call to check field visibility
+                            self._validateFieldVisibility(sComponentId, oRecord, sResolvedHash, sTableName);
+                        } else {
+                            self.setBusyOff();
+                        }
+                    },
+                    "error": function () {
+                        MessageToast.show(self.getResourceBundle().getText("msgErrorFetchingFormData"));
+                        self.setBusyOff();
+                    }
+                });
+            };
+            if (sHash) {
+                fnFetchData(sHash);
+                return;
+            }
+            this.getoHashToken().done(function (oResult) {
+                var sFetchedHash = oResult && oResult.hash;
+                if (!sFetchedHash) {
+                    MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+                    // Turn off busy indicator if hash token cannot be fetched
+                    if (self._oFormDialog) {
+                        self._oFormDialog.setBusy(false);
+                    }
+                    return;
+                }
+                fnFetchData(sFetchedHash);
+            }).fail(function () {
+                MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+                // Turn off busy indicator on hash token fetch failure
+                if (self._oFormDialog) {
+                    self._oFormDialog.setBusy(false);
+                }
+            });
+        },
+        _validateFieldVisibility: function (sComponentId, oRecord, sHash, sTableName) {
+            var self = this;
+            // Show busy indicator on dialog
+            if (this._oFormDialog) {
+                this._oFormDialog.setBusy(true);
+            }
+            $.ajax({
+                "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sTableName) + "/validate/" + encodeURIComponent(sComponentId) + "?hash=" + encodeURIComponent(sHash),
+                "method": "POST",
+                "contentType": "application/json",
+                "dataType": "json",
+                "data": JSON.stringify(oRecord),
+                "success": function (response) {
+                    // Update field visibility based on validation response
+                    self._updateFieldVisibilityFromValidation(response, sHash);
+                    // Hide busy indicator on dialog
+                    if (self._oFormDialog) {
+                        self._oFormDialog.setBusy(false);
+                    }
+                    // Hide global busy indicator
+                    self.setBusyOff();
+                },
+                "error": function () {
+                    // If validation fails, hide busy indicator
+                    if (self._oFormDialog) {
+                        self._oFormDialog.setBusy(false);
+                    }
+                    // Hide global busy indicator
+                    self.setBusyOff();
+                }
+            });
+        },
+        _hideEmptyFormContainers: function () {
+            if (!this._simpleForms || !this._simpleForms.length) {
+                return;
+            }
+            this._simpleForms.forEach(function (oSimpleForm) {
+                if (!oSimpleForm || oSimpleForm.bIsDestroyed) { return; }
+                var oForm = oSimpleForm.getAggregation("form");
+                if (!oForm || typeof oForm.getFormContainers !== "function") { return; }
+                oForm.getFormContainers().forEach(function (oContainer) {
+                    var aElements = (typeof oContainer.getFormElements === "function")
+                        ? oContainer.getFormElements() : [];
+                    var bAnyVisible = aElements.some(function (oElement) {
+                        var oLabel = (typeof oElement.getLabel === "function") ? oElement.getLabel() : null;
+                        if (oLabel && typeof oLabel.getVisible === "function" && oLabel.getVisible()) {
+                            return true;
+                        }
+                        var aFields = (typeof oElement.getFields === "function") ? oElement.getFields() : [];
+                        return aFields.some(function (oFld) {
+                            return oFld && typeof oFld.getVisible === "function" && oFld.getVisible();
+                        });
+                    });
+                    if (typeof oContainer.setVisible === "function") {
+                        oContainer.setVisible(bAnyVisible);
+                    }
+                });
+            });
+        },
+        _updateFieldVisibilityFromValidation: function (oValidationResponse, sResolvedHash) {
+            if (!oValidationResponse || !this._fieldControlMap) {
+                return;
+            }
+
+            var oFormModel = this._oFormDialog && this._oFormDialog.getModel("FormData");
+            if (!oFormModel) {
+                return;
+            }
+
+            var oFormData = oFormModel.getProperty("/formData");
+            if (!oFormData || !oFormData.fields) {
+                return;
+            }
+
+            // Check if updateStates is available in the response
+            var oUpdateStates = oValidationResponse.updateStates;
+            var bHasUpdateStates = oUpdateStates && typeof oUpdateStates === "object";
+
+            var self = this;
+            var iVisibleFieldCount = 0;
+            var fnSetFieldVisible = function (sFieldKey, bVisible) {
+                var oTargets = self._fieldVisibilityMap && self._fieldVisibilityMap[sFieldKey];
+                if (oTargets) {
+                    if (oTargets.label) {
+                        oTargets.label.setVisible(bVisible);
+                    }
+                    if (oTargets.container) {
+                        oTargets.container.setVisible(bVisible);
+                    }
+                    return;
+                }
+
+                var oFallbackControl = self._fieldControlMap[sFieldKey];
+                if (oFallbackControl) {
+                    oFallbackControl.setVisible(bVisible);
+                }
+            };
+            var fnIsFieldVisible = function (sFieldKey) {
+                var oTargets = self._fieldVisibilityMap && self._fieldVisibilityMap[sFieldKey];
+                if (oTargets) {
+                    if (oTargets.container) {
+                        return oTargets.container.getVisible();
+                    }
+                    if (oTargets.label) {
+                        return oTargets.label.getVisible();
+                    }
+                }
+
+                var oFallbackControl = self._fieldControlMap[sFieldKey];
+                return !!(oFallbackControl && oFallbackControl.getVisible());
+            };
+
+            oFormData.fields.forEach(function (oField) {
+                var sFieldKey = oField.fieldName || oField.name;
+                var oControl = self._fieldControlMap[sFieldKey];
+                var oVisibilityTargets = self._fieldVisibilityMap && self._fieldVisibilityMap[sFieldKey];
+
+                if (!oControl && !oVisibilityTargets) {
+                    return;
+                }
+
+                // Rule 1b: Expanded BO fields (from foreign table) inherit visibility
+                // from their parent foreign field's updateState. The parent field is
+                // replaced by the expanded fields in oFormData.fields, so its updateState
+                // would otherwise be ignored — leaving e.g. the "Visible for Valve Asset
+                // Type" tab visible for non-Valve assets because expanded BO fields keep
+                // the category populated. Fall back to "visible" only when the parent has
+                // no updateState (preserves the original behaviour for tabs without
+                // asset-type rules).
+                if (oField._businessObjectName) {
+                    var bExpandedVisible = true;
+                    var sParentFieldKey = self._expandedFieldToApiFieldMap &&
+                        self._expandedFieldToApiFieldMap[sFieldKey];
+                    if (sParentFieldKey && bHasUpdateStates) {
+                        var oParentUpdateState;
+                        if (Array.isArray(oUpdateStates)) {
+                            oParentUpdateState = oUpdateStates.find(function (oItem) {
+                                return oItem.fieldName === sParentFieldKey ||
+                                    oItem.name === sParentFieldKey ||
+                                    oItem.id === sParentFieldKey;
+                            });
+                        } else {
+                            oParentUpdateState = oUpdateStates[sParentFieldKey] ||
+                                oUpdateStates[String(sParentFieldKey)];
+                        }
+                        if (oParentUpdateState !== undefined && oParentUpdateState !== null) {
+                            bExpandedVisible = oParentUpdateState.visible !== undefined
+                                ? oParentUpdateState.visible === true
+                                : true;
+                        }
+                    }
+                    fnSetFieldVisible(sFieldKey, bExpandedVisible);
+                    if (bExpandedVisible) {
+                        iVisibleFieldCount++;
+                    }
+                    return;
+                }
+
+                var bFieldVisible = true; // default visibility
+
+                if (bHasUpdateStates) {
+                    var oFieldUpdateState;
+
+                    // Find field in updateStates (handle both array and object)
+                    if (Array.isArray(oUpdateStates)) {
+                        oFieldUpdateState = oUpdateStates.find(function (oItem) {
+                            return oItem.fieldName === sFieldKey || oItem.name === sFieldKey || oItem.id === sFieldKey;
+                        });
+                    } else {
+                        oFieldUpdateState = oUpdateStates[sFieldKey] || oUpdateStates[String(sFieldKey)];
+                    }
+
+                    if (oFieldUpdateState !== undefined && oFieldUpdateState !== null) {
+                        // updateStates from server takes priority over formVisible metadata
+                        bFieldVisible = oFieldUpdateState.visible !== undefined
+                            ? oFieldUpdateState.visible === true
+                            : true;
+                    } else {
+                        // Field NOT in updateStates -> fall back to formVisible metadata
+                        bFieldVisible = oField.formVisible !== false;
+                    }
+                } else {
+                    // No updateStates -> fall back to formVisible metadata
+                    bFieldVisible = oField.formVisible !== false;
+                }
+
+                fnSetFieldVisible(sFieldKey, bFieldVisible);
+                if (bFieldVisible) {
+                    iVisibleFieldCount++;
+                }
+            });
+
+            // After per-field visibility is settled, collapse FormContainers whose
+            // entire content is invisible. Without this, a SimpleForm container whose
+            // FormElements all became invisible (typically the leading implicit
+            // container holding fields hidden by runtime visibility rules — e.g. the
+            // BTP "Visible for Valve Asset Type" tab) would still draw its padding
+            // and produce whitespace at the top of the tab.
+            this._hideEmptyFormContainers();
+
+            // After all field visibilities are updated, hide tabs whose fields are all hidden
+            if (this._categoryTabMap && oFormData.fields) {
+                // Build a map of category -> whether any field in that category is visible
+                var oCategoryVisibility = {};
+                oFormData.fields.forEach(function (oField) {
+                    var sCat = oField.category || self._defaultCategoryName || (oFormData.categories && oFormData.categories[0] && oFormData.categories[0].name) || "General";
+                    if (oCategoryVisibility[sCat] === undefined) {
+                        oCategoryVisibility[sCat] = false;
+                    }
+                    var sFieldKey = oField.fieldName || oField.name;
+                    if (fnIsFieldVisible(sFieldKey)) {
+                        oCategoryVisibility[sCat] = true;
+                    }
+                });
+                Object.keys(self._categoryTabMap).forEach(function (sCatName) {
+                    var oTab = self._categoryTabMap[sCatName];
+                    if (oTab) {
+                        oTab.setVisible(oCategoryVisibility[sCatName] === true);
+                    }
+                });
+            }
+
+            // If no fields are visible, show message and hide save button
+            if (iVisibleFieldCount === 0) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoFieldsVisible") || "Fields are not visible");
+                // Hide the save button
+                if (this._oFormDialog) {
+                    var oSaveButton = this._oFormDialog.getBeginButton();
+                    if (oSaveButton) {
+                        oSaveButton.setVisible(false);
+                    }
+                }
+            }
+
+            // Apply updatedValues from validation response to form fields
+            if (oValidationResponse.updatedValues && typeof oValidationResponse.updatedValues === "object") {
+                var oUpdatedValues = oValidationResponse.updatedValues;
+                Object.keys(oUpdatedValues).forEach(function (sFieldKey) {
+                    var oControl = self._fieldControlMap[sFieldKey];
+                    if (!oControl) { return; }
+                    var vValue = oUpdatedValues[sFieldKey];
+
+                    // Fields in _nestedLookupFieldMap store a raw LI_ID — re-resolve to
+                    // display text instead of blindly setting the raw integer.
+                    if (self._nestedLookupFieldMap && self._nestedLookupFieldMap.hasOwnProperty(sFieldKey)) {
+                        if (vValue !== undefined && vValue !== null && vValue !== "") {
+                            var vLiId = (vValue !== null && typeof vValue === "object")
+                                ? (vValue.LI_ID !== undefined ? vValue.LI_ID : vValue)
+                                : vValue;
+                            var sLlId = self._nestedLookupFieldMap[sFieldKey];
+                            var aWhere = [{ "field": "LI_ID", "method": "eq", "value": vLiId }];
+                            if (sLlId !== undefined && sLlId !== null) {
+                                aWhere.unshift({ "field": "LL_ID", "method": "eq", "value": sLlId });
+                            }
+                            var sHashForLookup = sResolvedHash || self.getLocalDataModel().getProperty("/HashToken");
+                            (function (oCtrl, vRawId) {
+                                $.ajax({
+                                    "url": self.isRunninglocally() + "/bo/Lookup_Item/",
+                                    "method": "GET",
+                                    "dataType": "json",
+                                    "headers": { "X-NEXUS-Filter": JSON.stringify({ "where": aWhere }) },
+                                    "data": { "hash": sHashForLookup },
+                                    "success": function (resp) {
+                                        var aRows = Array.isArray(resp && resp.rows) ? resp.rows
+                                            : Array.isArray(resp) ? resp : [];
+                                        if (oCtrl.isA && oCtrl.isA("sap.m.Input")) {
+                                            oCtrl.setValue(aRows.length > 0
+                                                ? String(aRows[0].Comments || aRows[0].Value || aRows[0].Name || vRawId)
+                                                : String(vRawId));
+                                        }
+                                    },
+                                    "error": function () {
+                                        if (oCtrl.isA && oCtrl.isA("sap.m.Input")) { oCtrl.setValue(String(vRawId)); }
+                                    }
+                                });
+                            }(oControl, vLiId));
+                        } else {
+                            if (oControl.isA && oControl.isA("sap.m.Input")) { oControl.setValue(""); }
+                        }
+                        return;
+                    }
+
+                    if (oControl.isA && oControl.isA("sap.m.Select")) {
+                        oControl.setSelectedKey(vValue !== undefined && vValue !== null ? String(vValue) : "");
+                    } else if (oControl.isA && oControl.isA("sap.m.ComboBox")) {
+                        oControl.setValue(vValue !== undefined && vValue !== null ? String(vValue) : "");
+                    } else if (oControl.isA && oControl.isA("sap.m.Input")) {
+                        if (oControl.data && oControl.data("calcBoolean")) {
+                            if (vValue === undefined || vValue === null || vValue === "") {
+                                oControl.setValue("");
+                            } else {
+                                var bBoolVal;
+                                if (typeof vValue === "boolean") {
+                                    bBoolVal = vValue;
+                                } else if (typeof vValue === "number") {
+                                    bBoolVal = vValue !== 0;
+                                } else {
+                                    var sLower = String(vValue).trim().toLowerCase();
+                                    bBoolVal = sLower === "true" || sLower === "yes" || sLower === "1";
+                                }
+                                oControl.setValue(bBoolVal ? "Yes" : "No");
+                            }
+                        } else {
+                            // Apply the field's format directive ("d{N}") and the
+                            // whole-number rule on validation echoes too. Without this,
+                            // calc fields like "Selected Int. Corr. Rate" (format "d3")
+                            // get re-set with raw backend precision like
+                            // "4.37065304627105" each time validation runs, overwriting
+                            // the formatted value applied during initial populate.
+                            var sValToSet = vValue !== undefined && vValue !== null ? String(vValue) : "";
+                            if (sValToSet) {
+                                var iVrFieldType = self._fieldTypeIdMap && self._fieldTypeIdMap[sFieldKey];
+                                var iVrEditorType = self._fieldEditorTypeMap && self._fieldEditorTypeMap[sFieldKey];
+                                var bVrColourPicker = iVrFieldType === 3 && iVrEditorType === 16;
+                                if (!bVrColourPicker) {
+                                    var sVrFormat = self._fieldFormatMap && self._fieldFormatMap[sFieldKey];
+                                    if (sVrFormat) {
+                                        var oVrFormatMatch = /^d(\d+)$/i.exec(sVrFormat);
+                                        if (oVrFormatMatch) {
+                                            var iVrDecimals = parseInt(oVrFormatMatch[1], 10);
+                                            if (iVrDecimals >= 0 && iVrDecimals <= 20) {
+                                                var fVrNumeric = parseFloat(sValToSet);
+                                                if (!isNaN(fVrNumeric) && Number.isFinite(fVrNumeric)) {
+                                                    sValToSet = fVrNumeric.toFixed(iVrDecimals);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (/^-?\d+\.\d+$/.test(sValToSet)) {
+                                        sValToSet = sValToSet.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+                                    }
+                                }
+                            }
+                            oControl.setValue(sValToSet);
+                        }
+                        // If this is a colour-mapped Input, repaint the swatch with the new value
+                        if (self._colourInputMap && self._colourInputMap[sFieldKey]) {
+                            var sNewHex = self._tcolorToCssHex(Number(vValue));
+                            if (sNewHex) {
+                                self._colourValueMap = self._colourValueMap || {};
+                                self._colourValueMap[sFieldKey] = sNewHex;
+                                if (!oControl.getEnabled()) { oControl.setValue(""); }
+                                var oColInner = oControl.getDomRef("inner");
+                                if (oColInner) {
+                                    oColInner.style.backgroundColor = sNewHex;
+                                    oColInner.style.color = oControl.getEnabled() ? "transparent" : "#000000";
+                                    oColInner.style.fontWeight = "bold";
+                                }
+                            }
+                        }
+                    } else if (oControl.isA && oControl.isA("sap.m.TextArea")) {
+                        oControl.setValue(vValue !== undefined && vValue !== null ? String(vValue) : "");
+                    } else if (oControl.isA && oControl.isA("sap.m.CheckBox")) {
+                        oControl.setSelected(!!vValue);
+                    } else if (oControl.isA && oControl.isA("sap.m.DatePicker")) {
+                        if (vValue) {
+                            var oDate = new Date(vValue);
+                            if (!isNaN(oDate.getTime())) {
+                                oControl.setDateValue(oDate);
+                            } else {
+                                oControl.setValue(String(vValue));
+                            }
+                        }
+                    } else if (oControl.isA && oControl.isA("sap.m.TimePicker")) {
+                        oControl.setValue(vValue !== undefined && vValue !== null ? String(vValue) : "");
+                    }
+                });
+            }
+
+            // Backend omits calc fields (fieldTypeId 40) from updatedValues when the
+            // computed value is null — e.g. "Function A + B" and "Numeric to Whole
+            // Number" disappear from the response after their numeric inputs are
+            // cleared, while string calcs like "Function 2" are echoed back as "".
+            // Clear any tracked calc field that the response did not include so the
+            // displayed value matches the recomputation instead of retaining a stale
+            // result. Skip when there is no validation response payload at all
+            // (request failed) so we don't wipe valid values on transient errors.
+            if (self._calculatedFieldKeys && oValidationResponse &&
+                typeof oValidationResponse === "object") {
+                var oReceivedValues = (oValidationResponse.updatedValues &&
+                    typeof oValidationResponse.updatedValues === "object")
+                    ? oValidationResponse.updatedValues
+                    : {};
+                Object.keys(self._calculatedFieldKeys).forEach(function (sCalcKey) {
+                    if (Object.prototype.hasOwnProperty.call(oReceivedValues, sCalcKey)) {
+                        return; // backend echoed a value — already applied above
+                    }
+                    var oCalcControl = self._fieldControlMap[sCalcKey];
+                    if (!oCalcControl) { return; }
+                    if (oCalcControl.isA && oCalcControl.isA("sap.m.Input")) {
+                        if (oCalcControl.data && oCalcControl.data("calcBoolean")) {
+                            oCalcControl.setValue("");
+                        } else {
+                            oCalcControl.setValue("");
+                        }
+                        // Reset colour swatch if this calc renders as a colour input
+                        if (self._colourInputMap && self._colourInputMap[sCalcKey]) {
+                            if (self._colourValueMap) { self._colourValueMap[sCalcKey] = null; }
+                            var oColInner = oCalcControl.getDomRef("inner");
+                            if (oColInner) {
+                                oColInner.style.backgroundColor = "";
+                                oColInner.style.color = "";
+                                oColInner.style.fontWeight = "";
+                            }
+                        }
+                    } else if (oCalcControl.isA && oCalcControl.isA("sap.m.TextArea")) {
+                        oCalcControl.setValue("");
+                    } else if (oCalcControl.isA && oCalcControl.isA("sap.m.CheckBox")) {
+                        oCalcControl.setSelected(false);
+                    } else if (oCalcControl.isA && oCalcControl.isA("sap.m.DatePicker")) {
+                        oCalcControl.setValue("");
+                        if (oCalcControl.setDateValue) { oCalcControl.setDateValue(null); }
+                    } else if (oCalcControl.isA && oCalcControl.isA("sap.m.TimePicker")) {
+                        oCalcControl.setValue("");
+                    }
+                });
+            }
+
+            // Apply readOnly state from updateStates
+            if (oValidationResponse.updateStates && Array.isArray(oValidationResponse.updateStates)) {
+                oValidationResponse.updateStates.forEach(function (oState) {
+                    if (oState.readOnly !== undefined) {
+                        var sFieldKey = oState.fieldName || oState.name;
+                        var oControl = self._fieldControlMap[sFieldKey];
+                        if (oControl && oControl.setEditable) {
+                            oControl.setEditable(!oState.readOnly);
+                        }
+                    }
+                });
+            }
+
+            // Apply invalidFields: mark labels as required (red *) to indicate mandatory fields
+            // First, clear any previously applied required state on all labels
+            Object.keys(self._fieldControlMap).forEach(function (sKey) {
+                var oTargets = self._fieldVisibilityMap && self._fieldVisibilityMap[sKey];
+                if (oTargets && oTargets.label && oTargets.label.setRequired) {
+                    oTargets.label.setRequired(false);
+                }
+            });
+            if (oValidationResponse.invalidFields && Array.isArray(oValidationResponse.invalidFields)) {
+                oValidationResponse.invalidFields.forEach(function (oInvalid) {
+                    var sFieldKey = oInvalid.field;
+                    if (!sFieldKey) { return; }
+                    var oTargets = self._fieldVisibilityMap && self._fieldVisibilityMap[sFieldKey];
+                    if (oTargets && oTargets.label && oTargets.label.setRequired) {
+                        oTargets.label.setRequired(true);
+                    }
+                });
+            }
+
+            // Re-apply colour backgrounds after SAPUI5 flushes its render queue
+            // (setVisible above triggers re-render which wipes inline styles)
+            setTimeout(function () { self._reapplyColourSwatches(); }, 0);
+        },
+        /**
+         * Gathers current form field values into a payload object for the validation API.
+         */
+        _getFormDataPayload: function () {
+            var oPayload = {};
+            var self = this;
+            
+            if (!this._fieldControlMap) {
+                return oPayload;
+            }
+            
+            Object.keys(this._fieldControlMap).forEach(function (sFieldKey) {
+                var oControl = self._fieldControlMap[sFieldKey];
+                if (!oControl) { return; }
+                
+                var vValue;
+                var bForceSendNull = false;
+                if (oControl.isA && oControl.isA("sap.m.Select")) {
+                    vValue = oControl.getSelectedKey();
+                } else if (oControl.isA && oControl.isA("sap.m.ComboBox")) {
+                    vValue = oControl.getValue();
+                } else if (oControl.isA && oControl.isA("sap.m.Input")) {
+                    vValue = oControl.getValue();
+                    // Numeric inputs return "" when cleared — same as string inputs —
+                    // but the backend treats "" for numeric fields ambiguously and
+                    // skips recalculating dependent calculated fields. Convert to an
+                    // explicit null and force-send so calculated fields like
+                    // "Function A + B" or "Numeric to Whole Number" re-evaluate to
+                    // empty when their numeric inputs are cleared (matches the
+                    // working string-field behaviour for BTP Calc 2).
+                    if (vValue === "" && oControl.getType && oControl.getType() === "Number") {
+                        vValue = null;
+                        bForceSendNull = true;
+                    }
+                } else if (oControl.isA && oControl.isA("sap.m.TextArea")) {
+                    vValue = oControl.getValue();
+                } else if (oControl.isA && oControl.isA("sap.m.CheckBox")) {
+                    vValue = oControl.getSelected();
+                } else if (oControl.isA && oControl.isA("sap.m.DatePicker")) {
+                    var oDate = oControl.getDateValue();
+                    vValue = oDate ? oDate.toISOString() : null;
+                } else if (oControl.isA && oControl.isA("sap.m.TimePicker")) {
+                    return; // Skip TimePicker fields - backend validation rejects time-only values
+                } else if (oControl.isA && oControl.isA("sap.ui.table.Table")) {
+                    return; // Skip table controls
+                }
+
+                // Include empty strings so the backend can detect cleared string fields
+                // and recalculate dependent calculated fields. Numeric inputs cleared
+                // by the user are force-sent as null (see bForceSendNull) so the
+                // backend recognises the empty state for numeric calculations too.
+                if (vValue !== undefined && (vValue !== null || bForceSendNull)) {
+                    oPayload[sFieldKey] = vValue;
+                }
+            });
+            
+            return oPayload;
+        },
+        
+        /**
+         * Attach change handlers to all form fields to trigger validation on change.
+         */
+        _attachFormFieldChangeHandlers: function () {
+            var self = this;
+            if (!this._fieldControlMap) {
+                return;
+            }
+            
+            Object.keys(this._fieldControlMap).forEach(function (sFieldKey) {
+                var oControl = self._fieldControlMap[sFieldKey];
+                if (!oControl) { return; }
+                
+                // Create a debounced handler to avoid too many API calls
+                var fnOnFieldChange = function () {
+                    if (self._validationDebounceTimer) {
+                        clearTimeout(self._validationDebounceTimer);
+                    }
+                    self._validationDebounceTimer = setTimeout(function () {
+                        self._triggerFieldValidation();
+                    }, 500); // 500ms debounce
+                };
+                
+                // Attach appropriate change event based on control type
+                if (oControl.attachChange) {
+                    oControl.attachChange(fnOnFieldChange);
+                }
+                if (oControl.attachLiveChange) {
+                    oControl.attachLiveChange(fnOnFieldChange);
+                }
+                if (oControl.attachSelect) {
+                    oControl.attachSelect(fnOnFieldChange);
+                }
+            });
+        },
+        
+        /**
+         * Trigger validation API call with current form data.
+         */
+        _triggerFieldValidation: function () {
+            var sTableName = this._formDataTableName;
+            var oLocalDataModel = this.getLocalDataModel();
+            var sComponentId = oLocalDataModel.getProperty("/sCompoonentID");
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            
+            if (!sTableName || !sComponentId || !sHash) {
+                return;
+            }
+            
+            var self = this;
+            var oPayload = this._getFormDataPayload();
+            
+            $.ajax({
+                "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sTableName) + "/validate/" + encodeURIComponent(sComponentId) + "?hash=" + encodeURIComponent(sHash),
+                "method": "POST",
+                "contentType": "application/json",
+                "dataType": "json",
+                "data": JSON.stringify(oPayload),
+                "success": function (response) {
+                    self._updateFieldVisibilityFromValidation(response);
+                },
+                "error": function () {
+                    // Silently handle validation errors
+                }
+            });
+        },
+
+        _onFieldImageButtonPress: function (sFieldKey) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var sComponentId = oLocalDataModel.getProperty("/sCompoonentID");
+            var sTableName = this._formDataTableName;
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            var self = this;
+
+            var fnFetch = function (sResolvedHash) {
+                var sUrl = self.isRunninglocally() +
+                    "/bo/" + encodeURIComponent(sTableName) +
+                    "/" + encodeURIComponent(sComponentId) +
+                    "/" + encodeURIComponent(sFieldKey) +
+                    "?hash=" + encodeURIComponent(sResolvedHash) +
+                    "&format=png";
+
+                fetch(sUrl, {
+                    headers: {
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+                    }
+                })
+                    .then(function (oResponse) {
+                        if (!oResponse.ok) {
+                            MessageToast.show("Image not available");
+                            return null;
+                        }
+                        return oResponse.blob();
+                    })
+                    .then(function (oBlob) {
+                        if (!oBlob) { return; }
+                        var sObjectUrl = URL.createObjectURL(oBlob);
+                        self._showFieldImagePopup(sObjectUrl, sFieldKey);
+                    })
+                    .catch(function () {
+                        MessageToast.show("Failed to load image");
+                    });
+            };
+
+            if (sHash) {
+                fnFetch(sHash);
+            } else {
+                this.getoHashToken().done(function (oResult) {
+                    if (oResult && oResult.hash) { fnFetch(oResult.hash); }
+                });
+            }
+        },
+        _onGlobalTableInfoPress: function (oField, oEvent) {
+            var sFieldName = oField.name || oField.fieldName || "";
+            // Use the Dynamic Form Dialog title (tile title) as the display value
+            var sDialogTitle = this._oFormDialog && this._oFormDialog.getModel("FormData")
+                ? (this._oFormDialog.getModel("FormData").getProperty("/title") || this._formDataTableName || "")
+                : (this._formDataTableName || "");
+
+            if (!this._oGlobalTableInfoDialog) {
+                this._oGlobalTableInfoDialog = new sap.m.Dialog({
+                    title: "Global Table Info",
+                    type: "Message",
+                    contentWidth: "20rem",
+                    buttons: [
+                        new sap.m.Button({
+                            text: "Close",
+                            press: function () {
+                                this._oGlobalTableInfoDialog.close();
+                            }.bind(this)
+                        })
+                    ]
+                });
+                this.getView().addDependent(this._oGlobalTableInfoDialog);
+            }
+
+            this._oGlobalTableInfoDialog.destroyContent();
+            this._oGlobalTableInfoDialog.addContent(
+                new VBox({
+                    items: [
+                        new Label({ text: "Table", design: "Bold" }),
+                        new Text({ text: sDialogTitle }),
+                        new Label({ text: "Field Name", design: "Bold" }).addStyleClass("sapUiSmallMarginTop"),
+                        new Text({ text: sFieldName })
+                    ]
+                }).addStyleClass("sapUiSmallMargin")
+            );
+            this._oGlobalTableInfoDialog.open();
+        },
+        _showFieldImagePopup: function (sSrc, sTitle) {
+            // Revoke previous object URL to avoid memory leaks
+            if (this._fieldImageObjectUrl) {
+                URL.revokeObjectURL(this._fieldImageObjectUrl);
+            }
+            this._fieldImageObjectUrl = sSrc;
+
+            // Reset zoom level each time a new image is opened
+            this._fImageZoom = 1.0;
+
+            if (!this._oFieldImageDialog) {
+                var self = this;
+
+                this._oFieldImageDialog = new sap.m.Dialog({
+                    stretch: false,
+                    resizable: true,
+                    draggable: true,
+                    contentWidth: "700px",
+                    contentHeight: "600px",
+                    afterClose: function () {
+                        // Clean up object URL after dialog closes
+                        if (this._fieldImageObjectUrl) {
+                            URL.revokeObjectURL(this._fieldImageObjectUrl);
+                            this._fieldImageObjectUrl = null;
+                        }
+                    }.bind(this),
+                    buttons: [
+                        new sap.m.Button({
+                            icon: "sap-icon://zoom-in",
+                            tooltip: "Zoom In",
+                            press: function () {
+                                self._fImageZoom = Math.min(self._fImageZoom + 0.25, 4.0);
+                                self._applyImageZoom();
+                            }
+                        }),
+                        new sap.m.Button({
+                            icon: "sap-icon://zoom-out",
+                            tooltip: "Zoom Out",
+                            press: function () {
+                                self._fImageZoom = Math.max(self._fImageZoom - 0.25, 0.25);
+                                self._applyImageZoom();
+                            }
+                        }),
+                        new sap.m.Button({
+                            icon: "sap-icon://reset",
+                            tooltip: "Reset Zoom",
+                            press: function () {
+                                self._fImageZoom = 1.0;
+                                self._applyImageZoom();
+                            }
+                        }),
+                        new sap.m.Button({
+                            text: "Close",
+                            press: function () {
+                                this._oFieldImageDialog.close();
+                            }.bind(this)
+                        })
+                    ]
+                });
+                this.getView().addDependent(this._oFieldImageDialog);
+            }
+
+            // Update title and image each time
+            this._oFieldImageDialog.setTitle("Function");
+            this._oFieldImageDialog.destroyContent();
+
+            var oScrollContainer = new sap.m.ScrollContainer({
+                horizontal: true,
+                vertical: true,
+                width: "100%",
+                height: "100%"
+            });
+
+            this._oFieldImageEl = new sap.m.Image({
+                id: this.getView().getId() + "--fieldZoomImage",
+                src: sSrc,
+                densityAware: false
+            }).addStyleClass("nexusFieldImage");
+
+            oScrollContainer.addContent(this._oFieldImageEl);
+            this._oFieldImageDialog.addContent(oScrollContainer);
+            this._fImageZoom = 1.0;
+            this._oFieldImageDialog.open();
+        },
+
+        _applyImageZoom: function () {
+            if (!this._oFieldImageEl) { return; }
+            var oDomRef = this._oFieldImageEl.getDomRef();
+            if (oDomRef) {
+                oDomRef.style.transform = "scale(" + this._fImageZoom + ")";
+                oDomRef.style.transformOrigin = "top left";
+                oDomRef.style.transition = "transform 0.2s ease";
+            }
+        },
+        _reapplyColourSwatches: function () {
+            var self = this;
+            if (!this._colourInputMap || !this._colourValueMap) { return; }
+            Object.keys(this._colourInputMap).forEach(function (sFieldKey) {
+                var oInput = self._colourInputMap[sFieldKey];
+                var sHex = self._colourValueMap[sFieldKey];
+                if (!oInput || !sHex) { return; }
+                if (!oInput.getEnabled()) { oInput.setValue(""); }
+                var oInner = oInput.getDomRef("inner");
+                if (oInner) {
+                    oInner.style.backgroundColor = sHex;
+                    oInner.style.color = oInput.getEnabled() ? "transparent" : "#000000";
+                    oInner.style.fontWeight = "bold";
+                }
+            });
+        },
+
+        /**
+         * For a field's unitId, find the matching Unit by Unit_ID,
+         * then find the Unit_Type by UT_ID to get the type info and reference symbol.
+         * Returns { symbol, utId, refUnit, unitTypeName } or null.
+         */
+        _getUnitInfoForField: function (iUnitId) {
+            if (!iUnitId) { return null; }
+            var iId = Number(iUnitId);
+
+            // Find the Unit record directly by Unit_ID
+            var oMatchedUnit = null;
+            for (var j = 0; j < this._aUnitData.length; j++) {
+                if (Number(this._aUnitData[j].Unit_ID) === iId) {
+                    oMatchedUnit = this._aUnitData[j];
+                    break;
+                }
+            }
+
+            // Find Unit_Type by UT_ID from the matched unit, or fall back to Ref_Unit_ID lookup
+            var oUnitType = null;
+            if (oMatchedUnit && oMatchedUnit.UT_ID) {
+                var iUtId = Number(oMatchedUnit.UT_ID);
+                for (var i = 0; i < this._aUnitTypeData.length; i++) {
+                    if (Number(this._aUnitTypeData[i].UT_ID) === iUtId) {
+                        oUnitType = this._aUnitTypeData[i];
+                        break;
+                    }
+                }
+            }
+            if (!oUnitType) {
+                // Fall back: find Unit_Type where Ref_Unit_ID === unitId
+                for (var k = 0; k < this._aUnitTypeData.length; k++) {
+                    if (Number(this._aUnitTypeData[k].Ref_Unit_ID) === iId) {
+                        oUnitType = this._aUnitTypeData[k];
+                        break;
+                    }
+                }
+            }
+            if (!oUnitType) { return null; }
+
+            // Find the reference Unit for this type (Ref_Unit_ID from Unit_Type)
+            var oRefUnit = null;
+            var iRefUnitId = Number(oUnitType.Ref_Unit_ID);
+            for (var m = 0; m < this._aUnitData.length; m++) {
+                if (Number(this._aUnitData[m].Unit_ID) === iRefUnitId) {
+                    oRefUnit = this._aUnitData[m];
+                    break;
+                }
+            }
+
+            return {
+                symbol: oMatchedUnit ? oMatchedUnit.Symbol : (oRefUnit ? oRefUnit.Symbol : (oUnitType.Reference_Symbol || "")),
+                utId: oUnitType.UT_ID,
+                refUnit: oRefUnit,
+                unitTypeName: oUnitType.Name
+            };
+        },
+
+        /**
+         * Get all units belonging to a UT_ID (unit type).
+         */
+        _getUnitsForType: function (iUtId) {
+            var iId = Number(iUtId);
+            return this._aUnitData.filter(function (oUnit) {
+                return Number(oUnit.UT_ID) === iId;
+            });
+        },
+
+        /**
+         * Lazily build the UT_ID -> preferred Unit_ID map by cross-referencing
+         * Unit_Item records (which only have Unit_ID) with /bo/Unit/ data (which has UT_ID).
+         */
+        _ensureUserPreferredUnitMap: function () {
+            if (this._bUserPreferredMapBuilt) { return; }
+            if (!this._aRawUnitItems || this._aRawUnitItems.length === 0 || this._aUnitData.length === 0) { return; }
+
+            this._oUserPreferredUnitByType = {};
+            var oMap = this._oUserPreferredUnitByType;
+            var aUnitData = this._aUnitData;
+            this._aRawUnitItems.forEach(function (oItem) {
+                if (oItem.Unit_ID) {
+                    var iUnitId = Number(oItem.Unit_ID);
+                    var oUnit = aUnitData.find(function (oU) {
+                        return Number(oU.Unit_ID) === iUnitId;
+                    });
+                    if (oUnit && oUnit.UT_ID) {
+                        oMap[Number(oUnit.UT_ID)] = iUnitId;
+                    }
+                }
+            });
+            this._bUserPreferredMapBuilt = true;
+        },
+
+        /**
+         * Handle unit symbol Link press: read the current field value,
+         * calculate conversions for all units of that type, and show in a Popover.
+         */
+        _onUnitSymbolPress: function (sFieldKey, iUnitId, oEvent) {
+            var oSource = oEvent.getSource();
+            var oControl = this._fieldControlMap[sFieldKey];
+            var self = this;
+            var vFieldValue = 0;
+
+            // Read current value from the form field
+            if (oControl) {
+                if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea")) {
+                    vFieldValue = parseFloat(oControl.getValue()) || 0;
+                } else if (oControl.isA("sap.m.Select")) {
+                    vFieldValue = parseFloat(oControl.getSelectedKey()) || 0;
+                }
+            }
+
+            var oUnitInfo = this._getUnitInfoForField(iUnitId);
+            if (!oUnitInfo) {
+                MessageToast.show("No unit information available");
+                return;
+            }
+
+            // Get all units in this unit type
+            var aUnits = this._getUnitsForType(oUnitInfo.utId);
+            if (aUnits.length === 0) {
+                MessageToast.show("No unit conversions available");
+                return;
+            }
+
+            // Determine current unit gradient/constant to convert back to reference first
+            var oCurrentInfo = this._unitFieldInfo[sFieldKey];
+            var fCurrentGradient = (oCurrentInfo && oCurrentInfo.currentGradient) || 1;
+            var fCurrentConstant = (oCurrentInfo && oCurrentInfo.currentConstant) || 0;
+            // Use stored precise reference value when available to avoid
+            // truncation errors from round-tripping through decimal formatting.
+            // If user manually edited the field, detect by comparing displayed
+            // value with expected rounded value and recompute if different.
+            var vRefValue;
+            if (oCurrentInfo && oCurrentInfo.referenceValue !== undefined) {
+                var fExpectedDisplay = oCurrentInfo.referenceValue * fCurrentGradient + fCurrentConstant;
+                var oDispUnit = self._aUnitData && self._aUnitData.find(function (oU) {
+                    return oU.Symbol === (oCurrentInfo.currentSymbol || "");
+                });
+                var iDispDec = (oDispUnit && oDispUnit.Decimals !== undefined && oDispUnit.Decimals !== null)
+                    ? Number(oDispUnit.Decimals) : 5;
+                var fExpectedRounded = parseFloat(fExpectedDisplay.toFixed(iDispDec));
+                if (Math.abs(vFieldValue - fExpectedRounded) < Math.pow(10, -(iDispDec + 1))) {
+                    // Displayed value matches expected — use stored precise reference
+                    vRefValue = oCurrentInfo.referenceValue;
+                } else {
+                    // User manually changed the value — recompute reference from input
+                    vRefValue = (vFieldValue - fCurrentConstant) / fCurrentGradient;
+                    oCurrentInfo.referenceValue = vRefValue;
+                }
+            } else {
+                vRefValue = (vFieldValue - fCurrentConstant) / fCurrentGradient;
+            }
+
+            // Ensure preference map is built from Unit_Item + Unit cross-reference
+            self._ensureUserPreferredUnitMap();
+            // Check for user preferred unit for this unit type
+            var iPreferredUnitId = self._oUserPreferredUnitByType
+                ? self._oUserPreferredUnitByType[Number(oUnitInfo.utId)]
+                : null;
+
+            // For each target unit: converted = vRefValue * targetGradient + targetConstant
+            var aConvertedItems = aUnits.map(function (oUnit) {
+                var fGradient = parseFloat(oUnit.Gradient) || 1;
+                var fConstant = parseFloat(oUnit.Constant) || 0;
+                var fConverted = vRefValue * fGradient + fConstant;
+                var iDecimals = (oUnit.Decimals !== undefined && oUnit.Decimals !== null) ? Number(oUnit.Decimals) : 5;
+                var sConverted = fConverted.toFixed(iDecimals);
+                return {
+                    name: oUnit.Name,
+                    symbol: oUnit.Symbol || "",
+                    value: sConverted,
+                    gradient: fGradient,
+                    constant: fConstant,
+                    unitId: oUnit.Unit_ID,
+                    isPreferred: iPreferredUnitId !== null && iPreferredUnitId !== undefined && Number(oUnit.Unit_ID) === Number(iPreferredUnitId)
+                };
+            });
+
+            // Sort preferred unit to top
+            aConvertedItems.sort(function (a, b) {
+                if (a.isPreferred && !b.isPreferred) { return -1; }
+                if (!a.isPreferred && b.isPreferred) { return 1; }
+                return 0;
+            });
+
+            // Determine which unit is the field's assigned (default) unit
+            var iDefaultUnitId = Number(iUnitId);
+
+            // Build and open Popover with unit conversions using DisplayListItem
+            var oList = new List({
+                mode: "SingleSelectMaster",
+                items: aConvertedItems.map(function (oItem) {
+                    var bIsDefault = Number(oItem.unitId) === iDefaultUnitId;
+                    var bIsCurrent = oItem.symbol === (oCurrentInfo && oCurrentInfo.currentSymbol);
+                    var sLabel = oItem.name + " (" + oItem.symbol + ")";
+                    if (bIsDefault) { sLabel += "  ·  Default"; }
+                    var oListItem = new DisplayListItem({
+                        label: sLabel,
+                        value: oItem.value + " " + oItem.symbol,
+                        type: "Active",
+                        selected: bIsCurrent
+                    });
+                    if (bIsDefault) { oListItem.addStyleClass("uomDefaultItem"); }
+                    if (bIsCurrent) { oListItem.addStyleClass("uomCurrentItem"); }
+                    oListItem.data("unitSymbol", oItem.symbol);
+                    oListItem.data("unitValue", oItem.value);
+                    oListItem.data("unitGradient", oItem.gradient);
+                    oListItem.data("unitConstant", oItem.constant);
+                    return oListItem;
+                }),
+                selectionChange: function (oSelEvent) {
+                    var oSelectedItem = oSelEvent.getParameter("listItem");
+                    if (!oSelectedItem) { return; }
+
+                    var sNewValue = oSelectedItem.data("unitValue");
+                    var sNewSymbol = oSelectedItem.data("unitSymbol");
+                    var fNewGradient = oSelectedItem.data("unitGradient");
+                    var fNewConstant = oSelectedItem.data("unitConstant");
+
+                    // Update the input field with the converted value
+                    if (oControl) {
+                        if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea")) {
+                            oControl.setValue(sNewValue);
+                        } else if (oControl.isA("sap.m.Select")) {
+                            oControl.setSelectedKey(sNewValue);
+                        }
+                    }
+
+                    // Update the unit link text to the selected unit symbol
+                    var oUnitLink = self._unitLinkMap[sFieldKey];
+                    if (oUnitLink) {
+                        oUnitLink.setText(sNewSymbol);
+                    }
+
+                    // Store current unit gradient/constant so next conversion is correct
+                    if (self._unitFieldInfo[sFieldKey]) {
+                        self._unitFieldInfo[sFieldKey].currentSymbol = sNewSymbol;
+                        self._unitFieldInfo[sFieldKey].currentGradient = fNewGradient;
+                        self._unitFieldInfo[sFieldKey].currentConstant = fNewConstant;
+                    }
+
+                    // Close the popover after selection
+                    if (self._oUnitPopover) {
+                        self._oUnitPopover.close();
+                    }
+                }
+            });
+
+            // Destroy previous popover if it exists
+            if (this._oUnitPopover) {
+                this._oUnitPopover.destroy();
+                this._oUnitPopover = null;
+            }
+
+            var aPopoverContent = [oList];
+
+            this._oUnitPopover = new Popover({
+                title: oUnitInfo.unitTypeName || "Unit Conversions",
+                contentWidth: "360px",
+                placement: "Bottom",
+                showHeader: true,
+                content: aPopoverContent
+            });
+            this._oUnitPopover.addStyleClass("uomConversionPopover");
+
+            this._oUnitPopover.openBy(oSource);
+        },
+        _checkPermissions: function (sProductValue, sHash) {
+            var self = this;
+            $.ajax({
+                "url": self.isRunninglocally() + "/bo/Lookup_Item/" + encodeURIComponent(sProductValue),
+                "method": "GET",
+                "dataType": "json",
+                "data": {
+                    "hash": sHash
+                },
+                "success": function (response) {
+                    // Check @permissions at all possible levels in the response
+                    var sPermissions = "";
+                    if (response) {
+                        if (response["@permissions"]) {
+                            sPermissions = response["@permissions"];
+                        } else if (Array.isArray(response.rows) && response.rows.length > 0 && response.rows[0]["@permissions"]) {
+                            sPermissions = response.rows[0]["@permissions"];
+                        } else if (Array.isArray(response) && response.length > 0 && response[0]["@permissions"]) {
+                            sPermissions = response[0]["@permissions"];
+                        } else if (response.data && response.data["@permissions"]) {
+                            sPermissions = response.data["@permissions"];
+                        }
+                    }
+                    if (sPermissions === "read") {
+                        self._setFormReadOnly(true);
+                    } else {
+                        self._setFormReadOnly(false);
+                    }
+                    self.setBusyOff();
+                },
+                "error": function () {
+                    // If permission check fails, default to editable
+                    self._setFormReadOnly(false);
+                    self.setBusyOff();
+                }
+            });
+        },
+        _setFormReadOnly: function (bReadOnly) {
+            return; // Temporarily disable read-only logic until permissions are properly set up
+            // Set all form field controls to read-only / non-editable
+            if (this._fieldControlMap) {
+                Object.keys(this._fieldControlMap).forEach(function (sKey) {
+                    var oControl = this._fieldControlMap[sKey];
+                    if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.DatePicker") || oControl.isA("sap.m.Select")) {
+                        oControl.setEditable(!bReadOnly);
+                    } else if (oControl.isA("sap.m.CheckBox")) {
+                        oControl.setEnabled(!bReadOnly);
+                    }
+                }.bind(this));
+            }
+            // Show or hide the Save button
+            if (this._oFormDialog) {
+                var oSaveButton = this._oFormDialog.getBeginButton();
+                if (oSaveButton) {
+                    oSaveButton.setVisible(!bReadOnly);
+                }
+            }
+        },
+        _tcolorToCssHex: function (tcolor) {
+            if (isNaN(tcolor) || tcolor < 0) { return null; }
+            var v = tcolor >>> 0;
+            var r = v & 0xFF;
+            var g = (v >>> 8) & 0xFF;
+            var b = (v >>> 16) & 0xFF;
+            return "#" + [r, g, b].map(function (n) { return n.toString(16).padStart(2, "0"); }).join("").toUpperCase();
+        },
+        _cssHexToTcolor: function (sHex) {
+            var s = String(sHex || "").replace(/^#/, "").trim();
+            if (s.length === 3) { s = s.split("").map(function (c) { return c + c; }).join(""); }
+            if (!/^[0-9a-fA-F]{6}$/.test(s)) { return 0; }
+            var r = parseInt(s.substr(0, 2), 16);
+            var g = parseInt(s.substr(2, 2), 16);
+            var b = parseInt(s.substr(4, 2), 16);
+            return ((b & 0xFF) << 16) | ((g & 0xFF) << 8) | (r & 0xFF);
+        },
+        _resolveCssColorToHex: function (sColor) {
+            if (!sColor) { return null; }
+            var s = String(sColor).trim();
+            // Already hex (with or without leading #) — normalise to #RRGGBB
+            var m = /^#?([0-9a-fA-F]{6})$|^#?([0-9a-fA-F]{3})$/.exec(s);
+            if (m) {
+                var h = m[1] || m[2].split("").map(function (c) { return c + c; }).join("");
+                return "#" + h.toUpperCase();
+            }
+            // Named colour or rgb()/rgba() — resolve via the DOM
+            var el = document.createElement("div");
+            el.style.color = s;
+            document.body.appendChild(el);
+            var sComputed = window.getComputedStyle(el).color;
+            document.body.removeChild(el);
+            var rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(sComputed);
+            if (!rgb) { return null; }
+            var pad = function (n) { return Number(n).toString(16).padStart(2, "0"); };
+            return "#" + (pad(rgb[1]) + pad(rgb[2]) + pad(rgb[3])).toUpperCase();
+        },
+        _populateLinkedFields: function (oLinkedResponse, sBusinessObjectName) {
+            if (!oLinkedResponse) { return; }
+            var aRows = this._linkedDataByBO[sBusinessObjectName] || [];
+            if (aRows.length === 0) { return; }
+
+            var self = this;
+            var oBoControls = (this._boScopedControlMap && this._boScopedControlMap[sBusinessObjectName]) || {};
+
+            // Collect ordered Select field keys belonging to this BO
+            var aSelectFields = [];
+            var aNonSelectFields = [];
+            Object.keys(oBoControls).forEach(function (sFieldKey) {
+                var oControl = oBoControls[sFieldKey];
+                if (oControl && oControl.isA("sap.m.Select")) {
+                    aSelectFields.push(sFieldKey);
+                } else {
+                    aNonSelectFields.push(sFieldKey);
+                }
+            });
+
+            // Build cascade order using form order with independent chain detection
+            // E.g. Asset_Type → Generic_Material → Spec_and_Grade → Product_Form → Condition
+            //       Nps → Schedule (independent chain)
+            var aCascadeOrder = this._buildCascadeOrder(aSelectFields, aRows);
+            this._cascadeFieldOrder[sBusinessObjectName] = aCascadeOrder;
+
+            // Build chain index: field → chain index (for cross-chain boundary checks)
+            var aChains = aCascadeOrder._chains || [aCascadeOrder.slice()];
+            this._cascadeChainIndex = this._cascadeChainIndex || {};
+            var oChainIndex = {};
+            aChains.forEach(function (aChain, iChainIdx) {
+                aChain.forEach(function (sField) {
+                    oChainIndex[sField] = iChainIdx;
+                });
+            });
+            this._cascadeChainIndex[sBusinessObjectName] = oChainIndex;
+
+            // Populate root of each independent chain with all unique values
+            aChains.forEach(function (aChain) {
+                if (aChain.length > 0) {
+                    self._populateSelectUnique(aChain[0], aRows, sBusinessObjectName);
+                }
+            });
+
+            // Find the matching row based on the parent record's link value
+            var oMatchInfo = this._linkedFieldMatchInfo && this._linkedFieldMatchInfo[sBusinessObjectName];
+            var oMatchedRow = null;
+            var bLinkValueIsNull = false; // Track if linkValue is explicitly null (cleared)
+            if (oMatchInfo && oMatchInfo.filterField) {
+                if (oMatchInfo.linkValue === null) {
+                    // linkValue is explicitly null — no matching row, field should remain empty
+                    bLinkValueIsNull = true;
+                } else if (oMatchInfo.linkValue !== undefined) {
+                    oMatchedRow = aRows.find(function (oRow) {
+                        return String(oRow[oMatchInfo.filterField]) === String(oMatchInfo.linkValue);
+                    });
+                }
+            }
+            
+            // Only use first row if linkValue was found or is undefined (initial load)
+            // If linkValue is explicitly null (cleared), don't pre-populate
+            var oFirstRow = bLinkValueIsNull ? null : (oMatchedRow || aRows[0]);
+            for (var i = 0; i < aCascadeOrder.length; i++) {
+                var sField = aCascadeOrder[i];
+                var oControl = oBoControls[sField];
+                if (!oFirstRow) {
+                    // No matching row and linkValue is null — clear selection
+                    if (oControl) {
+                        this._setSelectValue(oControl, "");
+                    }
+                    continue;
+                }
+                var vValue = oFirstRow[sField];
+                if (oControl && vValue !== undefined && vValue !== null) {
+                    // For non-root fields, filter rows by all ancestor selections first
+                    if (i > 0) {
+                        var aFiltered = this._getFilteredRows(sBusinessObjectName, aCascadeOrder, i);
+                        this._populateSelectUnique(sField, aFiltered, sBusinessObjectName);
+                    }
+                    var sValueStr = String(vValue).trim();
+                    this._setSelectValue(oControl, sValueStr);
+                } else if (oControl && (vValue === "" || vValue === null || vValue === undefined)) {
+                    // Handle empty value - explicitly set to empty selection
+                    this._setSelectValue(oControl, "");
+                }
+            }
+
+            // Populate non-Select fields from first row
+            aNonSelectFields.forEach(function (sFieldKey) {
+                var oControl = oBoControls[sFieldKey];
+                if (!oFirstRow) { return; } // Skip if no row (linkValue was null)
+                var vValue = oFirstRow[sFieldKey];
+                if (vValue === undefined || vValue === null) { return; }
+                if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea") || oControl.isA("sap.m.TimePicker")) {
+                    oControl.setValue(String(vValue));
+                } else if (oControl.isA("sap.m.DatePicker")) {
+                    var oDate = new Date(vValue);
+                    if (!isNaN(oDate.getTime())) { oControl.setDateValue(oDate); } else { oControl.setValue(String(vValue)); }
+                } else if (oControl.isA("sap.m.CheckBox")) {
+                    oControl.setSelected(!!vValue);
+                }
+            });
+
+            // Attach cascade change handlers to each Select in the chain
+            for (var j = 0; j < aCascadeOrder.length; j++) {
+                (function (iIdx) {
+                    var sField = aCascadeOrder[iIdx];
+                    var oCtrl = oBoControls[sField];
+                    if (oCtrl && oCtrl.isA("sap.m.Select")) {
+                        oCtrl.attachChange(function () {
+                            self._onCascadeSelectChange(sBusinessObjectName, aCascadeOrder, iIdx);
+                        });
+                    }
+                })(j);
+            }
+        },
+
+        /**
+         * Build cascade order using form order (fields are already sorted by formOrder
+         * from buildFormContent). Separate independent chains by checking correlation:
+         * two fields are in the same chain if filtering by one affects the other's
+         * available values.
+         * E.g. Asset_Type → Generic_Material → Spec_and_Grade → Product_Form → Condition
+         *      Nps → Schedule (independent chain)
+         */
+        _buildCascadeOrder: function (aSelectFields, aRows) {
+            if (aSelectFields.length <= 1) { return aSelectFields.slice(); }
+
+            // Collect total unique values per field
+            var oAllUnique = {};
+            aSelectFields.forEach(function (sField) {
+                var oSeen = {};
+                aRows.forEach(function (oRow) {
+                    var v = oRow[sField];
+                    if (v !== undefined && v !== null && v !== "") {
+                        oSeen[String(v)] = true;
+                    }
+                });
+                oAllUnique[sField] = Object.keys(oSeen).length;
+            });
+
+            // Check if filtering by fieldA reduces the unique values of fieldB
+            function influences(sA, sB) {
+                var iBTotal = oAllUnique[sB];
+                if (iBTotal <= 1) { return false; }
+                var oGroupedByA = {};
+                aRows.forEach(function (oRow) {
+                    var vA = oRow[sA], vB = oRow[sB];
+                    if (vA == null || vA === "" || vB == null || vB === "") { return; }
+                    var sAVal = String(vA);
+                    if (!oGroupedByA[sAVal]) { oGroupedByA[sAVal] = {}; }
+                    oGroupedByA[sAVal][String(vB)] = true;
+                });
+                var aGroups = Object.keys(oGroupedByA);
+                for (var i = 0; i < aGroups.length; i++) {
+                    if (Object.keys(oGroupedByA[aGroups[i]]).length < iBTotal) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Group into independent chains: consecutive correlated fields
+            var aChains = [[aSelectFields[0]]];
+            for (var i = 1; i < aSelectFields.length; i++) {
+                var sCur = aSelectFields[i];
+                var aChain = aChains[aChains.length - 1];
+                var bCorrelated = false;
+                for (var j = 0; j < aChain.length; j++) {
+                    if (influences(aChain[j], sCur) || influences(sCur, aChain[j])) {
+                        bCorrelated = true;
+                        break;
+                    }
+                }
+                if (bCorrelated) {
+                    aChain.push(sCur);
+                } else {
+                    aChains.push([sCur]);
+                }
+            }
+
+            // Flatten chains maintaining form order within each
+            var aResult = [];
+            aChains.forEach(function (aChain) {
+                aResult = aResult.concat(aChain);
+            });
+
+            // Attach chain boundaries so consumers can respect independent chains
+            aResult._chains = aChains;
+            return aResult;
+        },
+
+        /**
+         * Populate a Select control with unique values from given rows.
+         */
+        _populateSelectUnique: function (sFieldKey, aRows, sBusinessObjectName) {
+            var oControl;
+            if (sBusinessObjectName && this._boScopedControlMap && this._boScopedControlMap[sBusinessObjectName]) {
+                oControl = this._boScopedControlMap[sBusinessObjectName][sFieldKey];
+            }
+            if (!oControl) {
+                oControl = this._fieldControlMap[sFieldKey];
+            }
+            if (!oControl || !oControl.isA("sap.m.Select")) { return; }
+            var aUniqueValues = [];
+            var oSeen = {};
+            aRows.forEach(function (oRow) {
+                var vVal = oRow[sFieldKey];
+                if (vVal !== undefined && vVal !== null && vVal !== "") {
+                    var sVal = String(vVal);
+                    if (!oSeen[sVal]) {
+                        oSeen[sVal] = true;
+                        aUniqueValues.push(sVal);
+                    }
+                }
+            });
+            // Sort unique values alphabetically before rendering
+            aUniqueValues.sort(function (a, b) {
+                return a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;
+            });
+            oControl.removeAllItems();
+            // Add empty option as first item so users can clear the selection
+            oControl.addItem(new Item({ key: "", text: "" }));
+            aUniqueValues.forEach(function (sVal) {
+                oControl.addItem(new Item({ key: sVal, text: sVal }));
+            });
+        },
+
+        /**
+         * Set a Select control's selected value by key or text match.
+         */
+        _setSelectValue: function (oControl, sValue) {
+            var aItems = oControl.getItems();
+            // For empty value, explicitly select the empty item (first item, typically)
+            if (sValue === "" || sValue === null || sValue === undefined) {
+                for (var i = 0; i < aItems.length; i++) {
+                    if (aItems[i].getKey() === "" || aItems[i].getText() === "") {
+                        oControl.setSelectedItem(aItems[i]);
+                        return;
+                    }
+                }
+                // If no empty item found, clear selection
+                oControl.setSelectedKey("");
+                return;
+            }
+            // For non-empty values, find exact match
+            for (var i = 0; i < aItems.length; i++) {
+                if (aItems[i].getKey() === sValue || aItems[i].getText() === sValue) {
+                    oControl.setSelectedItem(aItems[i]);
+                    return;
+                }
+            }
+            // No match found - don't default to first item, leave selection as-is or clear it
+            oControl.setSelectedKey("");
+        },
+
+        /**
+         * Get rows filtered by ancestor Select values in the same chain up to (but not including) iFieldIdx.
+         */
+        _getFilteredRows: function (sBusinessObjectName, aCascadeOrder, iFieldIdx) {
+            var aAllRows = this._linkedDataByBO[sBusinessObjectName] || [];
+            var aFiltered = aAllRows;
+            var oChainIndex = this._cascadeChainIndex && this._cascadeChainIndex[sBusinessObjectName];
+            var sTargetField = aCascadeOrder[iFieldIdx];
+            var iTargetChain = oChainIndex ? oChainIndex[sTargetField] : undefined;
+
+            var oBoControls = (this._boScopedControlMap && this._boScopedControlMap[sBusinessObjectName]) || {};
+            for (var i = 0; i < iFieldIdx; i++) {
+                var sAncestor = aCascadeOrder[i];
+                // Skip ancestors from different independent chains
+                if (oChainIndex && iTargetChain !== undefined && oChainIndex[sAncestor] !== iTargetChain) {
+                    continue;
+                }
+                var oAncestorCtrl = oBoControls[sAncestor] || this._fieldControlMap[sAncestor];
+                if (oAncestorCtrl && oAncestorCtrl.isA("sap.m.Select")) {
+                    var sSelectedKey = oAncestorCtrl.getSelectedKey();
+                    if (sSelectedKey) {
+                        aFiltered = aFiltered.filter(function (oRow) {
+                            return String(oRow[sAncestor] || "") === sSelectedKey;
+                        });
+                    }
+                }
+            }
+            return aFiltered;
+        },
+
+        /**
+         * Handle cascade Select change: clear and repopulate child Selects in the same chain.
+         */
+        _onCascadeSelectChange: function (sBusinessObjectName, aCascadeOrder, iChangedIdx) {
+            var oChainIndex = this._cascadeChainIndex && this._cascadeChainIndex[sBusinessObjectName];
+            var sChangedField = aCascadeOrder[iChangedIdx];
+            var iChangedChain = oChainIndex ? oChainIndex[sChangedField] : undefined;
+
+            var oBoControls = (this._boScopedControlMap && this._boScopedControlMap[sBusinessObjectName]) || {};
+            // For each child field after the changed one in the same chain, repopulate
+            for (var i = iChangedIdx + 1; i < aCascadeOrder.length; i++) {
+                var sChildField = aCascadeOrder[i];
+                // Skip fields from different independent chains
+                if (oChainIndex && iChangedChain !== undefined && oChainIndex[sChildField] !== iChangedChain) {
+                    continue;
+                }
+                var oChildCtrl = oBoControls[sChildField] || this._fieldControlMap[sChildField];
+                if (!oChildCtrl || !oChildCtrl.isA("sap.m.Select")) { continue; }
+
+                // Filter rows by all ancestors up to this child
+                var aFiltered = this._getFilteredRows(sBusinessObjectName, aCascadeOrder, i);
+                this._populateSelectUnique(sChildField, aFiltered, sBusinessObjectName);
+
+                // Auto-select first item
+                var aItems = oChildCtrl.getItems();
+                if (aItems.length > 0) {
+                    oChildCtrl.setSelectedItem(aItems[0]);
+                }
+            }
+        },
+
+        /**
+         * Apply saved values to BO-scoped Select fields.
+         * Called after _populateFormFields to override the default selections made by _populateLinkedFields.
+         * Updates _linkedFieldMatchInfo with fresh linkValues from the API response, then re-calls
+         * _populateLinkedFields so the cascade dropdowns reflect the current saved state.
+         */
+        _applyBoScopedFieldValues: function (oRecord) {
+            if (!oRecord || !this._boScopedControlMap) {
+                return;
+            }
+
+            var self = this;
+            Object.keys(this._boScopedControlMap).forEach(function (sBusinessObjectName) {
+                var oBoControls = self._boScopedControlMap[sBusinessObjectName];
+                if (!oBoControls) { return; }
+
+                if (!self._boParentFieldMap || !self._boParentFieldMap[sBusinessObjectName]) {
+                    return;
+                }
+
+                var oMapping = self._boParentFieldMap[sBusinessObjectName];
+                var sParentFieldName = oMapping.parentFieldName;
+                var sFilterField = oMapping.filterField;
+                var vFreshLinkValue = oRecord[sParentFieldName];
+
+                // Update _linkedFieldMatchInfo with fresh data from API response
+                self._linkedFieldMatchInfo = self._linkedFieldMatchInfo || {};
+                self._linkedFieldMatchInfo[sBusinessObjectName] = {
+                    filterField: sFilterField,
+                    linkValue: (vFreshLinkValue !== undefined && vFreshLinkValue !== null) ? vFreshLinkValue : null
+                };
+
+                // Re-call _populateLinkedFields so cascade dropdowns reflect the new saved state.
+                // This correctly handles both: selecting the matching row (non-null) or clearing (null).
+                var aRows = self._linkedDataByBO && self._linkedDataByBO[sBusinessObjectName];
+                if (aRows && aRows.length > 0) {
+                    self._populateLinkedFields({ _rePopulate: true }, sBusinessObjectName);
+                } else if (!vFreshLinkValue) {
+                    // No linked data loaded yet, but parent is null — directly clear all Select controls
+                    Object.keys(oBoControls).forEach(function (sFieldKey) {
+                        var oControl = oBoControls[sFieldKey];
+                        if (oControl && oControl.isA("sap.m.Select")) {
+                            oControl.clearSelection();
+                            oControl.setSelectedKey("");
+                        }
+                    });
+                }
+            });
+        },
+
+        _populateFormFields: function (oData) {
+            if (!oData || !this._fieldControlMap) {
+                return;
+            }
+
+            // The response may have rows array or be a direct object
+            var oRecord = oData;
+            if (Array.isArray(oData.rows) && oData.rows.length > 0) {
+                oRecord = oData.rows[0];
+            } else if (Array.isArray(oData) && oData.length > 0) {
+                oRecord = oData[0];
+            }
+            
+            // Initialize pending ComboBox values
+            if (!this._pendingComboBoxValues) {
+                this._pendingComboBoxValues = {};
+            }
+
+            var self = this;
+            Object.keys(this._fieldControlMap).forEach(function (sFieldKey) {
+                var oControl = self._fieldControlMap[sFieldKey];
+                
+                // Skip if control doesn't exist or is not a UI5 control
+                if (!oControl || typeof oControl !== "object" || !oControl.isA || typeof oControl.isA !== "function") {
+                    return;
+                }
+
+                // Skip BO-scoped Select/ComboBox controls — they're handled by _populateLinkedFields (cascade dropdowns)
+                // BUT: Do NOT skip expanded BO fields (non-Select types) — they should be populated with record values
+                var sBoName = self._fieldBusinessObjectMap && self._fieldBusinessObjectMap[sFieldKey];
+                if (sBoName) {
+                    var oBoCtrl = self._boScopedControlMap &&
+                        self._boScopedControlMap[sBoName] &&
+                        self._boScopedControlMap[sBoName][sFieldKey];
+                    if (oBoCtrl === oControl && (oControl.isA("sap.m.Select") || oControl.isA("sap.m.ComboBox"))) {
+                        return; // This IS the BO-scoped Select/ComboBox — skip, handled by _populateLinkedFields
+                    }
+                    // For non-Select BO fields (expanded Input, TextArea, DatePicker, etc.), continue and populate with record value
+                }
+                var vValue = oRecord[sFieldKey];
+                // For expanded BO fields, try mapping back to original API field name
+                if (!vValue && self._expandedFieldToApiFieldMap && self._expandedFieldToApiFieldMap[sFieldKey]) {
+                    var sApiFieldName = self._expandedFieldToApiFieldMap[sFieldKey];
+                    vValue = oRecord[sApiFieldName];
+                }
+                if (vValue === undefined || vValue === null) {
+                    // Explicitly clear the control when no value is saved
+                    // Sub-table controls are populated by _loadSubTableData — never clear them here
+                    if (oControl.isA && oControl.isA("sap.m.Table")) {
+                        return;
+                    }
+                    if (oControl.setValue) {
+                        oControl.setValue("");
+                    } else if (oControl.setDateValue) {
+                        oControl.setDateValue(null);
+                    } else if (oControl.setSelected) {
+                        oControl.setSelected(false);
+                    } else if (oControl.removeAllItems) {
+                        oControl.removeAllItems();
+                    }
+                    return;
+                }
+
+                // Handle error object values (e.g. {"error": "CO2 partial pressure is 0"})
+                // Display "NaN" in red to indicate the field could not be calculated
+                if (vValue && typeof vValue === "object" && !Array.isArray(vValue) && vValue.error) {
+                    if (!oControl || !oControl.isA) {
+                        return;
+                    }
+                    if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea")) {
+                        oControl.setValue("NaN");
+                        oControl.setEditable(false);
+                        oControl.addStyleClass("errorValueRedText");
+                    } else if (oControl.isA("sap.m.Select") || oControl.isA("sap.m.ComboBox")) {
+                        oControl.setEnabled(false);
+                        oControl.removeAllItems();
+                        oControl.addItem(new Item({ key: "__error__", text: "NaN" }));
+                        oControl.setSelectedKey("__error__");
+                        oControl.addStyleClass("errorValueRedText");
+                    } else if (oControl.isA("sap.m.DatePicker")) {
+                        oControl.setValue("NaN");
+                        oControl.setEditable(false);
+                        oControl.addStyleClass("errorValueRedText");
+                    }
+                    return;
+                }
+
+                if (!oControl || !oControl.isA) {
+                    return;
+                }
+
+                if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea")) {
+                    var sDisplayValue = String(vValue);
+                    if (oControl.data && oControl.data("calcBoolean")) {
+                        var bBoolVal;
+                        if (typeof vValue === "boolean") {
+                            bBoolVal = vValue;
+                        } else if (typeof vValue === "number") {
+                            bBoolVal = vValue !== 0;
+                        } else {
+                            var sLower = String(vValue).trim().toLowerCase();
+                            bBoolVal = sLower === "true" || sLower === "yes" || sLower === "1";
+                        }
+                        oControl.setValue(bBoolVal ? "Yes" : "No");
+                        return;
+                    }
+                    if (typeof vValue === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(vValue)) {
+                        var oParsedDate = new Date(vValue);
+                        if (!isNaN(oParsedDate.getTime())) {
+                            var sDay = String(oParsedDate.getUTCDate()).padStart(2, "0");
+                            var sMonth = String(oParsedDate.getUTCMonth() + 1).padStart(2, "0");
+                            sDisplayValue = sDay + "/" + sMonth + "/" + oParsedDate.getUTCFullYear();
+                        }
+                    }
+                    // Convert value to preferred unit if a preferred unit conversion exists,
+                    // and always apply the unit's Decimals formatting when a unit is present.
+                    // Backend returns value in the field's configured unit, NOT the reference unit.
+                    var oUnitFieldInfo = self._unitFieldInfo && self._unitFieldInfo[sFieldKey];
+                    if (oUnitFieldInfo) {
+                        var fRawValue = parseFloat(vValue);
+                        if (!isNaN(fRawValue)) {
+                            // Convert: field's unit → reference → current display unit
+                            var fFieldGradient = oUnitFieldInfo.fieldGradient || 1;
+                            var fFieldConstant = oUnitFieldInfo.fieldConstant || 0;
+                            var fCurrentGradient = oUnitFieldInfo.currentGradient || 1;
+                            var fCurrentConstant = oUnitFieldInfo.currentConstant || 0;
+                            // Step 1: raw value (field's unit) → reference value
+                            var fRefValue = (fRawValue - fFieldConstant) / fFieldGradient;
+                            // Store the precise reference value so subsequent conversions
+                            // (popover, save) do not lose precision from decimal truncation.
+                            oUnitFieldInfo.referenceValue = fRefValue;
+                            // Step 2: reference value → current display unit
+                            var fConverted = fRefValue * fCurrentGradient + fCurrentConstant;
+                            // Get decimals from the current (preferred or default) unit
+                            var oDisplayUnit = self._aUnitData && self._aUnitData.find(function (oU) {
+                                return oU.Symbol === oUnitFieldInfo.currentSymbol;
+                            });
+                            var iUnitDecimals = (oDisplayUnit && oDisplayUnit.Decimals !== undefined && oDisplayUnit.Decimals !== null)
+                                ? Number(oDisplayUnit.Decimals) : 5;
+                            // Preserve all decimal places from the raw value — do not truncate beyond what the server returned
+                            var iActualDecimals = (String(vValue).split(".")[1] || "").length;
+                            var iDecimals = Math.max(iUnitDecimals, iActualDecimals);
+                            sDisplayValue = fConverted.toFixed(iDecimals);
+                        }
+                    }
+                    // Numeric display rules. Colour-picker fields (fieldTypeId 3 +
+                    // editorTypeId 16) are skipped entirely — their integer TColor
+                    // values must remain literal.
+                    var iFieldType = self._fieldTypeIdMap && self._fieldTypeIdMap[sFieldKey];
+                    var iEditorType = self._fieldEditorTypeMap && self._fieldEditorTypeMap[sFieldKey];
+                    var bIsColourPicker = iFieldType === 3 && iEditorType === 16;
+                    if (!bIsColourPicker) {
+                        // Step 1: respect the field's format directive when present.
+                        // "d0" → 0 decimals, "d2" → 2 decimals, "d10" → 10 decimals.
+                        // Sentinel values like "d2147483647" (max int = "show as-is")
+                        // and other shapes ("s-1" scientific, "d-1") fall through
+                        // unchanged. Runs after unit-formatting so the format rule
+                        // overrides the unit's Decimals padding for fields that have
+                        // both. Without this, the BTP Numeric Fields Testing tab shows
+                        // raw stored precision like "4.333333" in a field configured
+                        // with format "d0" instead of rounding to "4".
+                        var sFieldFormat = self._fieldFormatMap && self._fieldFormatMap[sFieldKey];
+                        if (sFieldFormat) {
+                            var oFormatMatch = /^d(\d+)$/i.exec(sFieldFormat);
+                            if (oFormatMatch) {
+                                var iFormatDecimals = parseInt(oFormatMatch[1], 10);
+                                // Cap at 20 — toFixed loses precision beyond that, and
+                                // sentinels like 2147483647 mean "no enforced limit".
+                                if (iFormatDecimals >= 0 && iFormatDecimals <= 20) {
+                                    var fNumericForFormat = parseFloat(sDisplayValue);
+                                    if (!isNaN(fNumericForFormat) && Number.isFinite(fNumericForFormat)) {
+                                        sDisplayValue = fNumericForFormat.toFixed(iFormatDecimals);
+                                    }
+                                }
+                            }
+                        }
+                        // Step 2: strip trailing zeros from any decimal value — generic
+                        // cleanup that runs after both unit-formatting and the format
+                        // directive. "4.50" → "4.5", "0.10" → "0.1", "0.000" → "0",
+                        // "321.0" → "321", "1234.9" / "4.371" pass through unchanged.
+                        // The whole-number client rule is a natural special case of
+                        // this (when stripping leaves only "X." we strip the dot too).
+                        if (/^-?\d+\.\d+$/.test(sDisplayValue)) {
+                            sDisplayValue = sDisplayValue.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+                        }
+                    }
+                    oControl.setValue(sDisplayValue);
+                    if (self._colourInputMap && self._colourInputMap[sFieldKey] && oControl.isA("sap.m.Input")) {
+                        var sHex = self._tcolorToCssHex(Number(vValue));
+                        if (sHex) {
+                            // Keep the integer value visible & in getValue() for editable
+                            // colour pickers so save submits the picked colour. Read-only
+                            // calculated colour fields (enabled:false) get the value cleared
+                            // so only the swatch is visible — matching the legacy behaviour.
+                            if (!oControl.getEnabled()) { oControl.setValue(""); }
+                            self._colourValueMap[sFieldKey] = sHex;
+                            var sTextColor = oControl.getEnabled() ? "transparent" : "#000000";
+                            var oInner = oControl.getDomRef("inner");
+                            if (oInner) {
+                                oInner.style.backgroundColor = sHex;
+                                oInner.style.color = sTextColor;
+                                oInner.style.fontWeight = "bold";
+                            } else {
+                                oControl.addEventDelegate({
+                                    onAfterRendering: function () {
+                                        var oDomInner = oControl.getDomRef("inner");
+                                        if (oDomInner) {
+                                            oDomInner.style.backgroundColor = sHex;
+                                            oDomInner.style.color = sTextColor;
+                                            oDomInner.style.fontWeight = "bold";
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    } else if (oControl.isA("sap.m.Input") &&
+                               !(self._unitFieldInfo && self._unitFieldInfo[sFieldKey]) &&
+                               !(self._skipColorFields && self._skipColorFields[sFieldKey]) &&
+                               (self._fieldEditorTypeMap && self._fieldEditorTypeMap[sFieldKey] !== 4) &&
+                               /status|colou?r/i.test(sFieldKey || "")) {
+                        // Detect pure positive integer values as TColor (e.g. Risk_Status colour codes).
+                        // Guarded by name pattern + 24-bit range + editorTypeId !== 4 so plain
+                        // integer entry fields like Colour_Number / Valve_failure_threshold
+                        // aren't misread as colour codes.
+                        var vRaw = vValue;
+                        var bIsColorInt = (typeof vRaw === "number" && Number.isInteger(vRaw) && vRaw > 0 && vRaw <= 0xFFFFFF) ||
+                            (typeof vRaw === "string" && /^\d+$/.test(vRaw.trim()) && parseInt(vRaw.trim(), 10) > 0 && parseInt(vRaw.trim(), 10) <= 0xFFFFFF);
+                        if (bIsColorInt) {
+                            var nColorVal = (typeof vRaw === "number") ? vRaw : parseInt(String(vRaw).trim(), 10);
+                            var sColorHex = self._tcolorToCssHex(nColorVal);
+                            if (sColorHex) {
+                                oControl.setValue("");
+                                self._colourValueMap = self._colourValueMap || {};
+                                self._colourValueMap[sFieldKey] = sColorHex;
+                                (function (oCtrl, sBgColor) {
+                                    var oInnerDom = oCtrl.getDomRef("inner");
+                                    if (oInnerDom) {
+                                        oInnerDom.style.backgroundColor = sBgColor;
+                                        oInnerDom.style.color = "transparent";
+                                    } else {
+                                        oCtrl.addEventDelegate({
+                                            onAfterRendering: function () {
+                                                var oDom = oCtrl.getDomRef("inner");
+                                                if (oDom) {
+                                                    oDom.style.backgroundColor = sBgColor;
+                                                    oDom.style.color = "transparent";
+                                                }
+                                            }
+                                        });
+                                    }
+                                }(oControl, sColorHex));
+                            }
+                        }
+                    }
+                } else if (oControl.isA("sap.m.TimePicker")) {
+                    // API stores time as an ISO datetime string (e.g. "1899-12-30T14:30:00.000Z").
+                    // TimePicker valueFormat is "HH:mm:ss", so parse the date and extract the
+                    // time part; fall back to the raw string if parsing fails.
+                    var oTimeDate = new Date(vValue);
+                    if (!isNaN(oTimeDate.getTime())) {
+                        var sTH = String(oTimeDate.getUTCHours()).padStart(2, "0");
+                        var sTM = String(oTimeDate.getUTCMinutes()).padStart(2, "0");
+                        var sTS = String(oTimeDate.getUTCSeconds()).padStart(2, "0");
+                        oControl.setValue(sTH + ":" + sTM + ":" + sTS);
+                    } else {
+                        oControl.setValue(String(vValue));
+                    }
+                } else if (oControl.isA("sap.m.DatePicker")) {
+                    var oDate = new Date(vValue);
+                    if (!isNaN(oDate.getTime())) {
+                        oControl.setDateValue(oDate);
+                    } else {
+                        oControl.setValue(String(vValue));
+                    }
+                } else if (oControl.isA("sap.m.CheckBox")) {
+                    oControl.setSelected(!!vValue);
+                } else if (oControl.isA("sap.m.Select") || oControl.isA("sap.m.ComboBox")) {
+                    var sValueStr;
+                    // When the API returns a nested object (e.g. {LI_ID: 584, Value: "..."}) extract LI_ID
+                    if (vValue && typeof vValue === "object" && !Array.isArray(vValue)) {
+                        var vId = (vValue.LI_ID !== undefined && vValue.LI_ID !== null) ? vValue.LI_ID
+                            : (vValue.id !== undefined && vValue.id !== null ? vValue.id : null);
+                        var vTxt = (vValue.Value !== undefined && vValue.Value !== null) ? vValue.Value : null;
+                        sValueStr = vId !== null ? String(vId).trim() : (vTxt !== null ? String(vTxt).trim() : "");
+                    } else {
+                        sValueStr = String(vValue).trim();
+                    }
+
+                    // Store this value as pending - it will be applied after items load
+                    self._pendingComboBoxValues[sFieldKey] = {
+                        control: oControl,
+                        value: sValueStr
+                    };
+
+                    // Get all items in the select
+                    var aItems = oControl.getItems();
+
+                    if (aItems && aItems.length > 0) {
+                        // Items already loaded — reset to blank first, then apply matched value
+                        // This preserves empty values by passing them to _applyComboBoxValue
+                        oControl.setSelectedKey("");
+                        self._applyComboBoxValue(oControl, sFieldKey, sValueStr);
+                    } else {
+                        // Items not loaded yet - they will be applied when _applyPendingComboBoxValues is called
+                    }
+                } else if (oControl.isA("sap.m.Table")) {
+                    // Data is populated by _loadSubTableData – skip, do not overwrite
+                    return;
+                }
+            });
+        },
+        onFormDialogClose: function () {
+            if (this._oFormDialog) {
+                this._oFormDialog.setBusy(false);
+                this._clearFieldValidationErrors();
+                this._oFormDialog.close();
+            }
+        },
+
+        onOpenNexuslink: function () {
+            var oLocalDataModel = this.getLocalDataModel();
+            var oSelectedNode = oLocalDataModel.getProperty("/selectedNodeData");
+
+            if (!oSelectedNode || !oSelectedNode.VN_ID) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoAssetSelected"));
+                return;
+            }
+
+            var sVnId = oSelectedNode.VN_ID;
+            var sAigData = oLocalDataModel.getProperty("/selectedTableData");
+            var sAigId = sAigData && sAigData.key ? sAigData.key : "";
+
+            var sUrl = "https://trial.nexusic.com/?navigateTo=Asset&searchKey=VN_ID&searchValue=" + encodeURIComponent(sVnId) + "&tab=AIG&aigId=" + encodeURIComponent(sAigId);
+            window.open(sUrl, "_blank");
+        },
+
+        _showFieldValidationErrors: function (aInvalidFields) {
+            if (!this._fieldControlMap || !aInvalidFields) {
+                return;
+            }
+            aInvalidFields.forEach(function (oInvalid) {
+                var oControl = this._fieldControlMap[oInvalid.field];
+                if (oControl) {
+                    if (oControl.setValueState) {
+                        oControl.setValueState("Error");
+                        oControl.setValueStateText(oInvalid.message || this.getResourceBundle().getText("msgFieldRequired"));
+                    }
+                    // Add red border styling for better visibility
+                    if (oControl.addStyleClass) {
+                        oControl.addStyleClass("mandatoryFieldError");
+                    }
+                }
+            }.bind(this));
+        },
+
+        _makeDatePickerOnly: function (oDatePicker) {
+            // Block all character input — user must use the calendar popup only
+            oDatePicker.addEventDelegate({
+                onkeydown: function (oEvent) {
+                    // Allow: Tab(9), Shift(16), Ctrl(17), Alt(18), Escape(27),
+                    //        F4(115), Arrow keys(37-40), Delete(46), Backspace(8)
+                    var iKey = oEvent.keyCode || oEvent.which;
+                    var aAllowed = [8, 9, 16, 17, 18, 27, 37, 38, 39, 40, 46, 115];
+                    if (aAllowed.indexOf(iKey) === -1) {
+                        oEvent.preventDefault();
+                    }
+                }
+            });
+
+            // Forcefully hide week numbers in the Calendar popup every time it opens.
+            // The property showWeekNumbers:false may not propagate reliably in all Horizon theme versions,
+            // so we directly call setShowWeekNumbers on the internal Calendar after the popup renders.
+            oDatePicker.attachBrowserEvent("click", function () {
+                setTimeout(function () {
+                    // Access internal Calendar control — _oCalendar is the private reference used by sap.m.DatePicker
+                    var oCalendar = oDatePicker._oCalendar;
+                    if (!oCalendar && typeof oDatePicker._getCalendar === "function") {
+                        oCalendar = oDatePicker._getCalendar();
+                    }
+                    if (oCalendar && typeof oCalendar.setShowWeekNumbers === "function") {
+                        oCalendar.setShowWeekNumbers(false);
+                    }
+                }, 0);
+            });
+        },
+
+        _makeComboBoxSelectOnly: function (oComboBox) {
+            // Block all keyboard input so user can only pick from the dropdown list
+            oComboBox.addEventDelegate({
+                onkeydown: function (oEvent) {
+                    // Allow: Tab(9), Shift(16), Ctrl(17), Alt(18), Escape(27),
+                    //        F4(115), Arrow keys(37-40), Delete(46), Backspace(8), Enter(13)
+                    var iKey = oEvent.keyCode || oEvent.which;
+                    var aAllowed = [8, 9, 13, 16, 17, 18, 27, 37, 38, 39, 40, 46, 115];
+                    if (aAllowed.indexOf(iKey) === -1) {
+                        oEvent.preventDefault();
+                    }
+                }
+            });
+        },
+
+        _clearControlError: function (oControl) {
+            if (!oControl) { return; }
+            if (oControl.setValueState) {
+                oControl.setValueState("None");
+                oControl.setValueStateText("");
+            }
+            if (oControl.removeStyleClass) {
+                oControl.removeStyleClass("mandatoryFieldError");
+            }
+        },
+
+        _clearFieldValidationErrors: function () {
+            if (!this._fieldControlMap) {
+                return;
+            }
+            var oMap = this._fieldControlMap;
+            Object.keys(oMap).forEach(function (sKey) {
+                var oControl = oMap[sKey];
+                if (oControl && oControl.setValueState) {
+                    oControl.setValueState("None");
+                    oControl.setValueStateText("");
+                }
+                // Remove error styling
+                if (oControl.removeStyleClass) {
+                    oControl.removeStyleClass("mandatoryFieldError");
+                }
+            });
+        },
+
+        _validateMandatoryFields: function () {
+            var aValidationErrors = [];
+            var oFormData = this._oFormDialog.getModel("FormData").getProperty("/formData");
+
+            if (!oFormData || !oFormData.fields || !this._fieldControlMap) {
+                return aValidationErrors;
+            }
+
+            var self = this;
+            oFormData.fields.forEach(function (oField) {
+                if (oField.required && Number(oField.fieldTypeId) !== 5) {
+                    var sFieldKey = oField.fieldName || oField.name;
+                    var oControl = self._fieldControlMap[sFieldKey];
+                    if(oField.fieldName == "Component_ID"){
+                        return
+                    }
+                    if (oControl) {
+                        var bIsValid = false;
+
+                        if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea") || oControl.isA("sap.m.TimePicker")) {
+                            bIsValid = oControl.getValue() && oControl.getValue().trim() !== "";
+                        } else if (oControl.isA("sap.m.DatePicker")) {
+                            bIsValid = oControl.getDateValue() !== null;
+                        } else if (oControl.isA("sap.m.CheckBox")) {
+                            // Checkboxes are typically not mandatory in the same way
+                            bIsValid = true;
+                        } else if (oControl.isA("sap.m.Select")) {
+                            bIsValid = (oControl.getSelectedKey() || oControl.getValue()) &&
+                                (oControl.getSelectedKey() || oControl.getValue()).trim() !== "";
+                        }
+
+                        if (!bIsValid) {
+                            aValidationErrors.push({
+                                field: sFieldKey,
+                                label: oField.formCaption || oField.name || oField.fieldName || sFieldKey,
+                                message: self.getResourceBundle().getText("msgFieldRequired")
+                            });
+                        }
+                    }
+                }
+            });
+
+            return aValidationErrors;
+        },
+
+        _applyComboBoxValue: function (oSelect, sFieldKey, sValue) {
+            var aItems = oSelect.getItems();
+
+            if (!aItems || aItems.length === 0) {
+                return;
+            }
+
+            // Normalize the value for comparison
+            var sNormalizedValue = String(sValue).trim();
+
+            // Special handling for empty value — explicitly clear selection
+            if (sNormalizedValue === "") {
+                
+                // First try to find and select an empty item
+                for (var i = 0; i < aItems.length; i++) {
+                    if (aItems[i].getKey() === "" || aItems[i].getText() === "") {
+                        oSelect.setSelectedKey("");
+                        
+                        return;
+                    }
+                }
+                // No empty item exists — force clear by setting selectedKey to empty
+                oSelect.setSelectedKey("");
+                oSelect.clearSelection();
+                
+                return;
+            }
+
+            // Priority 1: Match by key (LI_ID) — database stores the LI_ID integer, not the display text
+            var matchedKey = null;
+            for (var i = 0; i < aItems.length; i++) {
+                var sItemKey = String(aItems[i].getKey()).trim();
+                if (sItemKey === sNormalizedValue || parseInt(sItemKey) === parseInt(sNormalizedValue)) {
+                    matchedKey = sItemKey;
+                    break;
+                }
+            }
+
+            // Priority 2: Fall back to display text match
+            if (matchedKey === null) {
+                for (var i = 0; i < aItems.length; i++) {
+                    var sItemText = String(aItems[i].getText()).trim();
+                    if (sItemText === sNormalizedValue) {
+                        matchedKey = aItems[i].getKey();
+                        break;
+                    }
+                }
+            }
+
+            if (matchedKey !== null) {
+                oSelect.setSelectedKey(matchedKey);
+            }
+            // If no match, leave selection unchanged (forceSelection:false keeps it blank)
+        },
+
+        _applyPendingComboBoxValues: function () {
+            if (!this._pendingComboBoxValues || Object.keys(this._pendingComboBoxValues).length === 0) {
+                return;
+            }
+
+            var self = this;
+            Object.keys(this._pendingComboBoxValues).forEach(function (sFieldKey) {
+                var oPending = self._pendingComboBoxValues[sFieldKey];
+                // Reset to blank first so forceSelection:false doesn't show stale/first item
+                oPending.control.setSelectedKey("");
+                self._applyComboBoxValue(oPending.control, sFieldKey, oPending.value);
+            });
+            // Clear pending values after applying
+            this._pendingComboBoxValues = {};
+        },
+        onFormSave: function () {
+            this._saveFormData(false);
+        },
+
+        onFormSaveAndClose: function () {
+            this._saveFormData(true);
+        },
+
+        _saveFormData: function (bCloseOnSuccess) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var sTableName = oLocalDataModel.getProperty("/selectedTableName");
+            var sComponentId = oLocalDataModel.getProperty("/sCompoonentID");
+            var sHash = oLocalDataModel.getProperty("/HashToken");
+            var self = this;
+            if (!sTableName || !sComponentId) {
+                MessageToast.show(this.getResourceBundle().getText("msgMissingTableOrComponent"));
+                return;
+            }
+            // Clear previous validation errors
+            self._clearFieldValidationErrors();
+            // Perform mandatory field validation
+            var aValidationErrors = self._validateMandatoryFields();
+            if (aValidationErrors.length > 0) {
+                self._showFieldValidationErrors(aValidationErrors);
+                // Navigate to the tab containing the first invalid field
+                var sFirstInvalidField = aValidationErrors[0].field;
+                var oSaveFormData = self._oFormDialog.getModel("FormData").getProperty("/formData");
+                if (oSaveFormData && oSaveFormData.fields) {
+                    var oInvalidField = oSaveFormData.fields.find(function (f) {
+                        return (f.fieldName || f.name) === sFirstInvalidField;
+                    });
+                    if (oInvalidField) {
+                        var sCat = oInvalidField.category ||
+                            (oSaveFormData.categories && oSaveFormData.categories[0] && oSaveFormData.categories[0].name) ||
+                            "General";
+                        var oTargetTab = self._categoryTabMap && self._categoryTabMap[sCat];
+                        if (oTargetTab) {
+                            var oTabBar = self._oFormDialog.getContent()[0];
+                            oTabBar.setSelectedKey(oTargetTab.getKey());
+                        }
+                    }
+                }
+                var aFieldNames = aValidationErrors.map(function (e) { return e.label || e.field; });
+                MessageBox.error(self.getResourceBundle().getText("msgFieldsRequireAttention", [aValidationErrors.length]) + "\n" + aFieldNames.join(", "), { duration: 4000 });
+                return;
+            }
+            // Collect form field values from _fieldControlMap (only non-empty values)
+            var oPayload = {};
+            if (this._fieldControlMap) {
+                Object.keys(this._fieldControlMap).forEach(function (sFieldKey) {
+                    var oControl = self._fieldControlMap[sFieldKey];
+                    var vValue;
+                    if (oControl.isA("sap.m.TimePicker")) {
+                        // Format time as "1899-12-30T{HH}:{MM}:{SS}.000Z" — the fixed epoch date
+                        // the backend uses to store time-only values.
+                        var oTimeDate = oControl.getDateValue();
+                        if (oTimeDate && !isNaN(oTimeDate.getTime())) {
+                            var sHH = String(oTimeDate.getHours()).padStart(2, "0");
+                            var sMM = String(oTimeDate.getMinutes()).padStart(2, "0");
+                            var sSS = String(oTimeDate.getSeconds()).padStart(2, "0");
+                            oPayload[sFieldKey] = "1899-12-30T" + sHH + ":" + sMM + ":" + sSS + ".000Z";
+                        } else {
+                            var sRaw = oControl.getValue();
+                            oPayload[sFieldKey] = sRaw !== "" ? sRaw : null;
+                        }
+                    } else if (oControl.isA("sap.m.Input") || oControl.isA("sap.m.TextArea")) {
+                        vValue = oControl.getValue();
+                        if (vValue !== "" && vValue !== undefined) {
+                            // Convert UOM fields back to the field's configured unit before saving.
+                            // Display might be in a preferred unit; backend expects the field's own unit.
+                            var oUnitMeta = self._unitFieldInfo && self._unitFieldInfo[sFieldKey];
+                            if (oUnitMeta) {
+                                var fDisplayed = parseFloat(vValue);
+                                if (!isNaN(fDisplayed)) {
+                                    var fCurrentGradient = oUnitMeta.currentGradient || 1;
+                                    var fCurrentConstant = oUnitMeta.currentConstant || 0;
+                                    var fFieldGradient = oUnitMeta.fieldGradient || 1;
+                                    var fFieldConstant = oUnitMeta.fieldConstant || 0;
+                                    // Use stored precise reference value when available to
+                                    // avoid truncation errors from decimal formatting.
+                                    var fRefValue;
+                                    if (oUnitMeta.referenceValue !== undefined) {
+                                        var fExpectedDisplay = oUnitMeta.referenceValue * fCurrentGradient + fCurrentConstant;
+                                        var oSaveDispUnit = self._aUnitData && self._aUnitData.find(function (oU) {
+                                            return oU.Symbol === (oUnitMeta.currentSymbol || "");
+                                        });
+                                        var iSaveDec = (oSaveDispUnit && oSaveDispUnit.Decimals !== undefined && oSaveDispUnit.Decimals !== null)
+                                            ? Number(oSaveDispUnit.Decimals) : 5;
+                                        var fExpRounded = parseFloat(fExpectedDisplay.toFixed(iSaveDec));
+                                        if (Math.abs(fDisplayed - fExpRounded) < Math.pow(10, -(iSaveDec + 1))) {
+                                            fRefValue = oUnitMeta.referenceValue;
+                                        } else {
+                                            fRefValue = (fDisplayed - fCurrentConstant) / fCurrentGradient;
+                                        }
+                                    } else {
+                                        // display unit → reference
+                                        fRefValue = (fDisplayed - fCurrentConstant) / fCurrentGradient;
+                                    }
+                                    // reference → field's unit
+                                    var fFieldValue = fRefValue * fFieldGradient + fFieldConstant;
+                                    oPayload[sFieldKey] = String(fFieldValue);
+                                } else {
+                                    oPayload[sFieldKey] = vValue;
+                                }
+                            } else {
+                                oPayload[sFieldKey] = vValue;
+                            }
+                        } else {
+                            // Empty value — explicitly send null so the backend clears the field
+                            oPayload[sFieldKey] = null;
+                        }
+                    } else if (oControl.isA("sap.m.DatePicker")) {
+                        // Use getDateValue() to get the JS Date
+                        var oDate = oControl.getDateValue();
+                        if (oDate) {
+                            var sYear = oDate.getFullYear();
+                            var sMonth = String(oDate.getMonth() + 1).padStart(2, "0");
+                            var sDay = String(oDate.getDate()).padStart(2, "0");
+                            if (oControl.isA("sap.m.DateTimePicker")) {
+                                // Include time component for DateTimePicker (fieldTypeId 11)
+                                var sHours = String(oDate.getHours()).padStart(2, "0");
+                                var sMins = String(oDate.getMinutes()).padStart(2, "0");
+                                var sSecs = String(oDate.getSeconds()).padStart(2, "0");
+                                oPayload[sFieldKey] = sYear + "-" + sMonth + "-" + sDay + "T" + sHours + ":" + sMins + ":" + sSecs;
+                            } else {
+                                oPayload[sFieldKey] = sYear + "-" + sMonth + "-" + sDay;
+                            }
+                        } else {
+                            // Date was cleared — explicitly send null so the backend clears the field
+                            oPayload[sFieldKey] = null;
+                        }
+                    } else if (oControl.isA("sap.m.CheckBox")) {
+                        oPayload[sFieldKey] = oControl.getSelected();
+                    } else if (oControl.isA("sap.m.Select")) {
+                        var sSelectedKey = oControl.getSelectedKey();
+                        var oSelectedItem = oControl.getSelectedItem();
+                        var sSelectedText = oSelectedItem ? oSelectedItem.getText() : "";
+
+                        // Prefer the selected key for lookup-backed dropdowns; fall back to text when no key exists.
+                        // Always include the field so clearing a selection is persisted.
+                        if (sSelectedKey !== "" && sSelectedKey !== undefined) {
+                            oPayload[sFieldKey] = sSelectedKey;
+                        } else if (sSelectedText !== "" && sSelectedText !== undefined) {
+                            oPayload[sFieldKey] = sSelectedText;
+                        } else {
+                            oPayload[sFieldKey] = null;
+                        }
+                    } else if (oControl.isA("sap.m.ComboBox")) {
+                        // ComboBox is editable — prefer selected key, then selected text, then typed value.
+                        // Always include the field so clearing a selection is persisted.
+                        var sComboKey = oControl.getSelectedKey();
+                        var oComboItem = oControl.getSelectedItem();
+                        var sComboValue = oComboItem ? oComboItem.getText() : oControl.getValue();
+                        if (sComboKey !== "" && sComboKey !== undefined) {
+                            oPayload[sFieldKey] = sComboKey;
+                        } else if (sComboValue !== "" && sComboValue !== undefined) {
+                            oPayload[sFieldKey] = sComboValue;
+                        } else {
+                            oPayload[sFieldKey] = null;
+                        }
+                    }
+                });
+            }
+            // Resolve BO cascade selections back to parent link field values
+            // NOTE: Skip expanded BO fields (those with _businessObjectName) as they should be saved
+            // directly as individual field values, not resolved back to a parent field.
+            if (this._boParentFieldMap && this._boScopedControlMap && this._linkedDataByBO) {
+                var oBoParentFieldMap = this._boParentFieldMap;
+                var oBoScopedControlMap = this._boScopedControlMap;
+                var oLinkedDataByBO = this._linkedDataByBO;
+                var oFormDataModel = this._oFormDialog.getModel("FormData");
+                var oFormData = oFormDataModel ? oFormDataModel.getProperty("/formData") : {};
+                var aAllFormFields = Array.isArray(oFormData && oFormData.fields) ? oFormData.fields : [];
+                
+                Object.keys(oBoParentFieldMap).forEach(function (sBoName) {
+                    var oMapping = oBoParentFieldMap[sBoName];
+                    var oBoControls = oBoScopedControlMap[sBoName];
+                    var aBoRows = oLinkedDataByBO[sBoName];
+                    if (!oMapping || !oBoControls || !aBoRows || !aBoRows.length) { return; }
+
+                    // Check if this BO has a genuine cascade chain (at least one chain with > 1 chained fields).
+                    // Cascade chains (e.g. NPS → Schedule) MUST use cascade resolution to save the parent FK.
+                    // Independent expanded fields (e.g. Annulus_Group, Valve_Display_Name) skip cascade and save directly.
+                    var aCascadeOrder = (self._cascadeFieldOrder && self._cascadeFieldOrder[sBoName]) || [];
+                    var aChains = aCascadeOrder._chains || [aCascadeOrder.slice()];
+                    var bHasCascadeChain = aChains.some(function (aChain) { return aChain.length > 1; });
+
+                    // For global table lookups (expanded BO fields with a valid parent FK mapping),
+                    // remove the expanded field names from the payload — they belong to the lookup
+                    // table, not the parent table — then fall through to resolve the parent FK below.
+                    var bHasExpandedFields = !bHasCascadeChain && Object.keys(oBoControls).some(function (sFieldKey) {
+                        var oField = aAllFormFields.find(function (f) {
+                            return (f.fieldName || f.name) === sFieldKey && f._businessObjectName;
+                        });
+                        return !!oField;
+                    });
+                    if (bHasExpandedFields) {
+                        // Purge expanded BO field keys from the payload so the parent table does not
+                        // receive columns that belong to the lookup BO.
+                        Object.keys(oBoControls).forEach(function (sFieldKey) {
+                            delete oPayload[sFieldKey];
+                        });
+                        // Fall through: the row-match logic below will write oPayload[parentFieldName] = PK.
+                    }
+
+                    // Filter rows by all current cascade Select values
+                    var aFiltered = aBoRows;
+                    Object.keys(oBoControls).forEach(function (sFieldKey) {
+                        var oCtrl = oBoControls[sFieldKey];
+                        if (oCtrl && oCtrl.isA("sap.m.Select")) {
+                            var sSelKey = oCtrl.getSelectedKey();
+                            if (sSelKey) {
+                                aFiltered = aFiltered.filter(function (oRow) {
+                                    return String(oRow[sFieldKey] || "") === sSelKey;
+                                });
+                            }
+                        }
+                    });
+
+                    // Use the first matching row's primary key as the parent field value
+                    if (aFiltered.length > 0) {
+                        var vPkValue = aFiltered[0][oMapping.filterField];
+                        if (vPkValue !== undefined && vPkValue !== null) {
+                            oPayload[oMapping.parentFieldName] = vPkValue;
+                        }
+                    }
+                });
+            }
+            self.setBusyOn();
+            oPayload.Component_ID = sComponentId; // Ensure Component_ID is included in payload for backend lookup
+            var fnPostData = function (sResolvedHash) {
+                self.setBusyOn();
+                $.ajax({
+                    "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sTableName) + "/" + encodeURIComponent(sComponentId) + "?hash=" + encodeURIComponent(sResolvedHash),
+                    "method": "POST",
+                    "contentType": "application/json",
+                    "dataType": "json",
+                    "data": JSON.stringify(oPayload),
+                    "success": function () {
+                        // Save any new sub-table rows added during this form session
+                        if (self._subTableControls && self._subTableControls.length) {
+                            self._subTableControls.forEach(function (oSubTable) {
+                                var sSubCatName = oSubTable.data("subTableName");
+                                var aAllItems = oSubTable.getItems();
+                                if (!sSubCatName || !aAllItems.length) { return; }
+                                var aSubVisibleFields = oSubTable.data("subTableFields") || [];
+
+                                aAllItems.forEach(function (oRowItem) {
+                                    var bIsNew = oRowItem.data("isNew") === true;
+                                    var oRowData = oRowItem.data("rowData");
+                                    var aCells = oRowItem.getCells();
+
+                                    // Build payload from current cell values
+                                    var oRowPayload = { Component_ID: sComponentId };
+                                    aCells.forEach(function (oCell, iIdx) {
+                                        var oColField = aSubVisibleFields[iIdx];
+                                        if (!oColField) { return; }
+                                        var sCellKey = oColField.fieldName || oColField.name;
+                                        var vCellValue;
+                                        if (oCell.isA("sap.m.Select")) {
+                                            vCellValue = oCell.getSelectedKey();
+                                        } else if (oCell.isA("sap.m.DatePicker")) {
+                                            var oCellDate = oCell.getDateValue();
+                                            if (oCellDate) {
+                                                var sCellYear = oCellDate.getFullYear();
+                                                var sCellMonth = String(oCellDate.getMonth() + 1).padStart(2, "0");
+                                                var sCellDay = String(oCellDate.getDate()).padStart(2, "0");
+                                                vCellValue = sCellYear + "-" + sCellMonth + "-" + sCellDay;
+                                            }
+                                        } else if (oCell.isA("sap.m.Input")) {
+                                            vCellValue = oCell.getValue();
+                                        }
+                                        if (vCellValue !== "" && vCellValue !== undefined && vCellValue !== null) {
+                                            oRowPayload[sCellKey] = vCellValue;
+                                        }
+                                    });
+
+                                    if (bIsNew) {
+                                        // New row – PUT to /bo/{tableName}/0?hash=... (id=0 signals record creation)
+                                        $.ajax({
+                                            "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sSubCatName) + "/0?hash=" + encodeURIComponent(sResolvedHash),
+                                            "method": "PUT",
+                                            "contentType": "application/json",
+                                            "dataType": "json",
+                                            "data": JSON.stringify(oRowPayload),
+                                            "success": function (oResponse) {
+                                                oRowItem.data("isNew", false);
+                                                if (oResponse) { oRowItem.data("rowData", oResponse); }
+                                            },
+                                            "error": function () {
+                                                MessageToast.show(self.getResourceBundle().getText("msgErrorSavingFormData"));
+                                            }
+                                        });
+                                    } else if (oRowData) {
+                                        // Existing row – find primary key (first *_ID field that is not Component_ID)
+                                        var sRowId = null;
+                                        Object.keys(oRowData).forEach(function (sKey) {
+                                            if (!sRowId && sKey !== "Component_ID" &&
+                                                (sKey === "id" || sKey === "ID" || /[_]ID$/i.test(sKey))) {
+                                                sRowId = oRowData[sKey];
+                                            }
+                                        });
+                                        if (sRowId !== null && sRowId !== undefined) {
+                                            // POST to /bo/{tableName}/{rowId} to update existing row
+                                            $.ajax({
+                                                "url": self.isRunninglocally() + "/bo/" + encodeURIComponent(sSubCatName) + "/" + encodeURIComponent(sRowId) + "?hash=" + encodeURIComponent(sResolvedHash),
+                                                "method": "POST",
+                                                "contentType": "application/json",
+                                                "dataType": "json",
+                                                "data": JSON.stringify(oRowPayload),
+                                                "success": function (oResponse) {
+                                                    if (oResponse) { oRowItem.data("rowData", oResponse); }
+                                                },
+                                                "error": function () {
+                                                    MessageToast.show(self.getResourceBundle().getText("msgErrorSavingFormData"));
+                                                }
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        MessageToast.show(self.getResourceBundle().getText("msgFormSaveSuccess"));
+                        self.setBusyOff();
+                        if (bCloseOnSuccess && self._oFormDialog) {
+                            self._oFormDialog.close();
+                        }
+                    },
+                    "error": function (jqXHR) {
+                        var sMsg = self.getResourceBundle().getText("msgErrorSavingFormData");
+                        try {
+                            var oErr = JSON.parse(jqXHR.responseText);
+                            // Handle structured validation errors
+                            if (oErr.invalidFields && Array.isArray(oErr.invalidFields) && oErr.invalidFields.length > 0) {
+                                self._showFieldValidationErrors(oErr.invalidFields);
+                                sMsg = self.getResourceBundle().getText("msgFieldsRequireAttention", [oErr.invalidFields.length]);
+                            } else {
+                                sMsg = oErr.message || oErr.error || oErr.Message || sMsg;
+                            }
+                        } catch (e) {
+                            sMsg = jqXHR.responseText || sMsg;
+                        }
+                        MessageToast.show(sMsg);
+                        self.setBusyOff();
+                    }
+                });
+            };
+
+            if (sHash) {
+                fnPostData(sHash);
+                return;
+            }
+            this.getoHashToken().done(function (oResult) {
+                var sFetchedHash = oResult && oResult.hash;
+                if (!sFetchedHash) {
+                    MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+                    return;
+                }
+                fnPostData(sFetchedHash);
+            }).fail(function () {
+                MessageToast.show(self.getResourceBundle().getText("msgUnableToFetchHash"));
+            });
+        },
+        onStaticTilePress: function (oEvent) {
+            var oLocalDataModel = this.getLocalDataModel();
+            var oSelectedNode = oLocalDataModel.getProperty("/selectedNodeData");
+            if (!oSelectedNode || !oSelectedNode.VN_ID) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoAssetSelected"));
+                return;
+            }
+            var sDashboardId = oEvent.getSource().data("dashboardId");
+            var sUrl = "https://trial.nexusic.com/?navigateTo=Asset&searchKey=VN_ID&searchValue=" + encodeURIComponent(oSelectedNode.VN_ID) + "&tab=Dashboard&dashboardId=" + sDashboardId;
+            window.open(sUrl, "_blank");
+        },
+
+        onSharePress: function () {
+            var oLocalDataModel = this.getLocalDataModel();
+            var oSelectedNode = oLocalDataModel.getProperty("/selectedNodeData");
+            if (!oSelectedNode || !oSelectedNode.CV_ID) {
+                MessageToast.show(this.getResourceBundle().getText("msgNoAssetSelected"));
+                return;
+            }
+            var sUrl = "https://trial.nexusic.com/?searchKey=Asset&searchValue=" + encodeURIComponent(oSelectedNode.CV_ID);
+            window.open(sUrl, "_blank");
+        },
+
+        onTileSharePress: function (oEvent) {
+            var oBundle = this.getResourceBundle();
+            var oContext = oEvent.getSource().getParent().getItems()[0].getBindingContext("LocalDataModel");
+            if (oContext) {
+                var sTileName = oContext.getProperty("Name");
+                var sUrl = window.location.href;
+                var sShareUrl = sUrl + (sUrl.indexOf("?") > -1 ? "&" : "?") + "tile=" + encodeURIComponent(sTileName);
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(sShareUrl).then(function () {
+                        MessageToast.show(oBundle.getText("msgTileLinkCopied"));
+                    }, function () {
+                        MessageToast.show(oBundle.getText("msgFailedToCopyLink"));
+                    });
+                } else {
+                    MessageToast.show(oBundle.getText("msgClipboardNotAvailable"));
+                }
+            }
+        },
+
+        handleFullScreen: function () {
+            this.bFocusFullScreenButton = true;
+            var sNextLayout = this.getOwnerComponent().getModel().getProperty("/actionButtonsInfo/midColumn/fullScreen");
+            this.getRouter()._oRoutes.Detail._oConfig.layout = "MidColumnFullScreen";
+            this.getRouter().navTo("Detail", { layout: sNextLayout }, true);
+        },
+        handleExitFullScreen: function () {
+            this.bFocusFullScreenButton = true;
+            var sNextLayout = this.getOwnerComponent().getModel().getProperty("/actionButtonsInfo/midColumn/exitFullScreen");
+            this.getRouter()._oRoutes.Detail._oConfig.layout = "TwoColumnsMidExpanded";
+            this.getRouter().navTo("Detail", { layout: sNextLayout }, true);
+        },
+        handleClose: function () {
+            var sNextLayout = this.getOwnerComponent().getModel().getProperty("/actionButtonsInfo/midColumn/closeColumn");
+            this.getRouter().navTo("Master", { layout: sNextLayout });
+        }
+    });
+});

@@ -1,0 +1,132 @@
+<mvc:View controllerName="com.nexus.asset.controller.Detail" xmlns:mvc="sap.ui.core.mvc" xmlns:uxap="sap.uxap"
+ xmlns="sap.m" xmlns:f="sap.f" xmlns:l="sap.ui.layout"
+    xmlns:form="sap.ui.layout.form"
+    xmlns:core="sap.ui.core"
+    xmlns:cssgrid="sap.ui.layout.cssgrid">
+    <core:Fragment fragmentName="com.nexus.asset.view.Breadcrumbs" type="XML" />
+    <uxap:ObjectPageLayout id="idEngDrawingObjPageLayout" class="assetDetailPage" headerContentPinnable="true" showTitleInHeaderContent="true">
+        <uxap:headerTitle>
+            <uxap:ObjectPageDynamicHeaderTitle>
+                <uxap:heading>
+                    <Title text="{i18n>lblAssetDetails}" wrapping="true" />
+                </uxap:heading>
+                <uxap:expandedContent>
+                    <ObjectStatus text="{= ${LocalDataModel>/selectedNodeData/Name} ? ${LocalDataModel>/selectedNodeData/Name} : ${i18n>lblNoAssetSelected} }" />
+                </uxap:expandedContent>
+                <uxap:actions>
+                    <OverflowToolbarButton id="shareBtn" type="Transparent" icon="sap-icon://action" press="onSharePress" tooltip="{LocalDataModel>/shareUrl}" />
+                </uxap:actions>
+                <uxap:navigationActions>
+					<OverflowToolbarButton type="Transparent" icon="sap-icon://full-screen" press="handleFullScreen" id="enterFullScreenBtnMid" tooltip="{i18n>tooltipEnterFullScreen}" visible="{= ${/actionButtonsInfo/midColumn/fullScreen} !== null }" />
+					<OverflowToolbarButton type="Transparent" icon="sap-icon://exit-full-screen" press="handleExitFullScreen" id="exitFullScreenBtnMid" tooltip="{i18n>tooltipExitFullScreen}" visible="{= ${/actionButtonsInfo/midColumn/exitFullScreen} !== null }" />
+					<OverflowToolbarButton type="Transparent" icon="sap-icon://decline" press="handleClose" tooltip="{i18n>tooltipCloseColumn}" visible="false" />
+                </uxap:navigationActions>
+            </uxap:ObjectPageDynamicHeaderTitle>
+        </uxap:headerTitle>
+        <uxap:sections>
+            <uxap:ObjectPageSection title="Dynamic Tiles">
+                <uxap:subSections>
+                    <uxap:ObjectPageSubSection title="Asset Information">
+                        <uxap:blocks>
+                            <VBox items="{LocalDataModel>/detailTileGroups}">
+                                <VBox class="sapUiSmallMarginBottom">
+                                    <Title text="{LocalDataModel>Category}" level="H5" class="sapUiTinyMarginBottom" />
+                                    <FlexBox class="assetTileGrid" wrap="Wrap" items="{LocalDataModel>tiles}" backgroundDesign="Solid">
+                                        <VBox class="assetTileWrapper">
+                                            <GenericTile
+                                                header="{LocalDataModel>Name}"
+                                                subheader="{LocalDataModel>Description}"
+                                                class="assetDetailTile"
+                                                press="onTilePress">
+                                            </GenericTile>
+                                            <core:Icon visible="false" src="sap-icon://action" class="assetTileShareIcon" press="onTileSharePress" tooltip="{i18n>tooltipShareNavigate}" />
+                                        </VBox>
+                                    </FlexBox>
+                                </VBox>
+                            </VBox>
+                        </uxap:blocks>
+                    </uxap:ObjectPageSubSection>
+                </uxap:subSections>
+            </uxap:ObjectPageSection>
+            <uxap:ObjectPageSection title="Dashboard">
+                <uxap:subSections>
+                    <uxap:ObjectPageSubSection title="Dashboard">
+                        <uxap:blocks>
+                            <FlexBox class="assetTileGrid" wrap="Wrap" justifyContent="Start" alignItems="Start">
+                                <VBox class="assetTileWrapper">
+                                    <GenericTile header="{i18n>lblAssetHealthInfo}" class="assetDetailTile" press="onStaticTilePress">
+                                        <customData>
+                                            <core:CustomData key="dashboardId" value="94" />
+                                        </customData>
+                                        <!--TileContent>
+                                            <ImageContent src="sap-icon://accidental-leave" />
+                                        </TileContent!-->
+                                    </GenericTile>
+                                </VBox>
+                                <VBox class="assetTileWrapper">
+                                    <GenericTile header="{i18n>lblRBI}" class="assetDetailTile" press="onStaticTilePress">
+                                        <customData>
+                                            <core:CustomData key="dashboardId" value="1201" />
+                                        </customData>
+                                        <!--TileContent>
+                                            <ImageContent src="sap-icon://pie-chart" />
+                                        </TileContent-->
+                                    </GenericTile>
+                                </VBox>
+                                <VBox class="assetTileWrapper">
+                                    <GenericTile header="{i18n>lblInspectionManager}" class="assetDetailTile" press="onStaticTilePress">
+                                        <customData>
+                                            <core:CustomData key="dashboardId" value="1180" />
+                                        </customData>
+                                        <!--TileContent>
+                                            <ImageContent src="sap-icon://key-user-settings" />
+                                        </TileContent-->
+                                    </GenericTile>
+                                </VBox>
+                                <VBox class="assetTileWrapper">
+                                    <GenericTile header="{i18n>lblAnomalyWorkflows}" class="assetDetailTile" press="onStaticTilePress">
+                                        <customData>
+                                            <core:CustomData key="dashboardId" value="1196" />
+                                        </customData>
+                                        <!--TileContent>
+                                            <ImageContent src="sap-icon://away" />
+                                        </TileContent-->
+                                    </GenericTile>
+                                </VBox>
+                            </FlexBox>
+                        </uxap:blocks>
+                    </uxap:ObjectPageSubSection>
+                </uxap:subSections>
+            </uxap:ObjectPageSection>
+            <uxap:ObjectPageSection title="SAP DATA">
+                <uxap:subSections>
+                    <uxap:ObjectPageSubSection title="SAP DATA">
+                        <uxap:blocks>
+                            <FlexBox class="assetTileGrid" wrap="Wrap" justifyContent="Start" alignItems="Start">
+                                <VBox class="assetTileWrapper">
+                                    <GenericTile header="{i18n>technicalObject}" class="assetDetailTile" press="onSAPDATATilePress">
+                                        <customData>
+                                            <core:CustomData key="dashboardId" value="94" />
+                                        </customData>
+                                        <!--TileContent>
+                                            <ImageContent src="sap-icon://accidental-leave" />
+                                        </TileContent!-->
+                                    </GenericTile>
+                                </VBox>
+                            </FlexBox>
+                        </uxap:blocks>
+                    </uxap:ObjectPageSubSection>
+                </uxap:subSections>
+            </uxap:ObjectPageSection>
+        </uxap:sections>
+        <uxap:footer>
+            <OverflowToolbar visible="false">
+                <ToolbarSpacer />
+                <Button id="idEditButton"  text="{i18n>btnEdit}" press="onEditPress" />
+				<Button id="idSaveButton"  text="{i18n>btnSave}" press="onSavePress" />
+				<Button text="{i18n>btnRecalculate}" press="onRecalculatePress"/>
+            </OverflowToolbar>
+        </uxap:footer>
+    </uxap:ObjectPageLayout>
+</mvc:View>
+
