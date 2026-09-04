@@ -17,8 +17,6 @@ sap.ui.define([
       this.oRouter.attachRouteMatched(this.onRouteMatched, this);
       this.oRouter.attachBeforeRouteMatched(this.onBeforeRouteMatched, this);
 
-      var data = oStorage.get("appSessionData");
-      
       // Navigate to Dashboard if no hash is present
       if (!content || content === "") {
         this.oRouter.navTo("Dashboard", {}, true);

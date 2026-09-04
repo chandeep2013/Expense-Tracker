@@ -25,7 +25,7 @@
     "int-test": "fiori run --open \"test/integration/opaTests.qunit.html\"",
     "start-variants-management": "fiori run --open \"/preview.html#app-preview\"",
     "unit-test": "fiori run --open \"test/unit/unitTests.qunit.html\"",
-    "test:timeout": "node --test test/license-timeout.test.js",
+    "test:timeout": "node --test test/*.test.js",
     "build:cf": "ui5 build preload --clean-dest --config ui5-deploy.yaml --include-task=generateCachebusterInfo",
     "build:mta": "rimraf resources mta_archives && mbt build",
     "undeploy": "cf undeploy comnexusasset --delete-services --delete-service-keys --delete-service-brokers"

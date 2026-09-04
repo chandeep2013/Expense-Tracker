@@ -1,5 +1,3 @@
-jQuery.sap.require("jquery.sap.storage");  // storage
-oStorage = jQuery.sap.storage(jQuery.sap.storage.Type.session); 
 sap.ui.define([
     "sap/ui/core/UIComponent",
     "com/nexus/asset/model/models",
