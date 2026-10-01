@@ -1,0 +1,14 @@
+{
+  "name": "myexpenses-approuter",
+  "description": "Approuter for MyExpenses on SAP BTP Cloud Foundry",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@sap/approuter": "^23"
+  },
+  "scripts": {
+    "start": "node node_modules/@sap/approuter/approuter.js"
+  }
+}

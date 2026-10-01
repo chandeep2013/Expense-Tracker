@@ -1,0 +1,35 @@
+{
+  "xsappname": "myexpenses",
+  "tenant-mode": "dedicated",
+  "description": "MyExpenses personal expense tracker",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.User",
+      "description": "Log and review own expenses"
+    }
+  ],
+  "role-templates": [
+    {
+      "name": "User",
+      "description": "MyExpenses user",
+      "scope-references": [
+        "$XSAPPNAME.User"
+      ]
+    }
+  ],
+  "role-collections": [
+    {
+      "name": "MyExpenses_User",
+      "description": "Log expenses and view personal reports",
+      "role-template-references": [
+        "$XSAPPNAME.User"
+      ]
+    }
+  ],
+  "oauth2-configuration": {
+    "redirect-uris": [
+      "https://*.hana.ondemand.com/**",
+      "https://*.ondemand.com/**"
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+<core:FragmentDefinition xmlns="sap.m" xmlns:core="sap.ui.core">
+  <Dialog id="expenseDialog" title="Edit expense" contentWidth="24rem" stretch="{shell>/phone}">
+    <content>
+      <VBox class="dialogForm">
+        <Label text="Date" required="true"/>
+        <DatePicker id="dlgDate" value="{dialog>/date}" valueFormat="yyyy-MM-dd" displayFormat="d MMM y" width="100%"/>
+        <Label text="Category" required="true"/>
+        <Select id="dlgCategory" selectedKey="{dialog>/category}" width="100%" items="{dialog>/categories}">
+          <core:Item key="{dialog>key}" text="{dialog>text}"/>
+        </Select>
+        <Label text="Amount (INR)" required="true"/>
+        <Input id="dlgAmount" value="{dialog>/amount}" width="100%" description="INR"/>
+        <Label text="Description"/>
+        <TextArea id="dlgDescription" value="{dialog>/description}" maxLength="120" rows="3" width="100%" growing="true"/>
+      </VBox>
+    </content>
+    <buttons>
+      <Button text="Delete" type="Reject" press=".onDelete"/>
+      <Button text="Cancel" press=".onCloseDialog"/>
+      <Button text="Save" type="Emphasized" press=".onSaveDialog"/>
+    </buttons>
+  </Dialog>
+</core:FragmentDefinition>

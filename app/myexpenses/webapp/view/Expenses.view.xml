@@ -1,0 +1,30 @@
+<mvc:View
+  controllerName="my.expenses.controller.Expenses"
+  xmlns:mvc="sap.ui.core.mvc"
+  xmlns="sap.m"
+  xmlns:core="sap.ui.core"
+  xmlns:l="sap.ui.layout">
+  <Page id="expensesPage" title="My expenses" backgroundDesign="Solid">
+    <headerContent>
+      <Button icon="sap-icon://refresh" tooltip="Refresh" press=".onRefresh"/>
+    </headerContent>
+    <content>
+      <VBox class="pageContent">
+        <Text id="summary" class="intro" text=""/>
+        <VBox class="card">
+          <l:Grid containerQuery="true" defaultSpan="XL3 L3 M6 S12" vSpacing="0.5" hSpacing="0.5">
+            <Select id="category" selectedKey="{filters>/category}" change=".onFilter" width="100%" items="{filters>/categories}">
+              <core:Item key="{filters>key}" text="{filters>text}"/>
+            </Select>
+            <SearchField id="search" placeholder="Search description" search=".onFilter" liveChange=".onSearch" width="100%"/>
+            <DatePicker id="fromDate" placeholder="From" valueFormat="yyyy-MM-dd" displayFormat="d MMM y" value="{filters>/fromDate}" change=".onFilter" width="100%"/>
+            <DatePicker id="toDate" placeholder="To" valueFormat="yyyy-MM-dd" displayFormat="d MMM y" value="{filters>/toDate}" change=".onFilter" width="100%"/>
+          </l:Grid>
+          <Button text="Clear filters" type="Transparent" press=".onClear"/>
+        </VBox>
+        <IllustratedMessage id="empty" illustrationType="NoData" title="No expenses yet" description="Save one from Log expense and it will show up here." visible="false"/>
+        <List id="list" noDataText="No expenses match these filters."/>
+      </VBox>
+    </content>
+  </Page>
+</mvc:View>

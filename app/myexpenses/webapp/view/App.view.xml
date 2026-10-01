@@ -1,0 +1,55 @@
+<mvc:View
+  controllerName="my.expenses.controller.App"
+  xmlns:mvc="sap.ui.core.mvc"
+  xmlns="sap.m"
+  xmlns:tnt="sap.tnt"
+  xmlns:core="sap.ui.core"
+  displayBlock="true"
+  height="100%">
+  <VBox class="shellRoot" renderType="Bare" fitContainer="true">
+    <tnt:ToolPage id="toolPage" sideExpanded="{= !${shell>/phone} }">
+      <tnt:header>
+        <tnt:ToolHeader>
+          <Button
+            icon="sap-icon://menu2"
+            type="Transparent"
+            tooltip="Menu"
+            press=".onToggleSide"
+            visible="{= !${shell>/phone} }"/>
+          <Title text="MyExpenses" level="H1"/>
+          <ToolbarSpacer/>
+          <Text text="INR" class="currencyBadge"/>
+        </tnt:ToolHeader>
+      </tnt:header>
+      <tnt:sideContent>
+        <tnt:SideNavigation id="sideNav" visible="{= !${shell>/phone} }">
+          <tnt:NavigationList itemSelect=".onSideNav">
+            <tnt:NavigationListItem text="Log expense" icon="sap-icon://add-document" key="log"/>
+            <tnt:NavigationListItem text="My expenses" icon="sap-icon://list" key="expenses"/>
+            <tnt:NavigationListItem text="Reports" icon="sap-icon://bar-chart" key="reports"/>
+          </tnt:NavigationList>
+        </tnt:SideNavigation>
+      </tnt:sideContent>
+      <tnt:mainContents>
+        <App id="app" height="100%"/>
+      </tnt:mainContents>
+    </tnt:ToolPage>
+    <Toolbar id="phoneNav" class="phoneNav" visible="{shell>/phone}">
+      <Button id="tabLog" text="Log" icon="sap-icon://add" press=".onPhoneNav" width="33%" type="Emphasized">
+        <customData>
+          <core:CustomData key="section" value="log"/>
+        </customData>
+      </Button>
+      <Button id="tabExpenses" text="Expenses" icon="sap-icon://list" press=".onPhoneNav" width="33%">
+        <customData>
+          <core:CustomData key="section" value="expenses"/>
+        </customData>
+      </Button>
+      <Button id="tabReports" text="Reports" icon="sap-icon://bar-chart" press=".onPhoneNav" width="33%">
+        <customData>
+          <core:CustomData key="section" value="reports"/>
+        </customData>
+      </Button>
+    </Toolbar>
+  </VBox>
+</mvc:View>

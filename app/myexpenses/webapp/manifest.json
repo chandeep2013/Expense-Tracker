@@ -1,0 +1,63 @@
+{
+  "_version": "1.65.0",
+  "sap.app": {
+    "id": "my.expenses",
+    "type": "application",
+    "title": "MyExpenses",
+    "description": "Log daily expenses and review them by day, week, and month.",
+    "applicationVersion": {
+      "version": "1.0.0"
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.ui5": {
+    "flexEnabled": false,
+    "dependencies": {
+      "minUI5Version": "1.136.0",
+      "libs": {
+        "sap.m": {},
+        "sap.tnt": {},
+        "sap.ui.core": {},
+        "sap.ui.layout": {}
+      }
+    },
+    "rootView": {
+      "viewName": "my.expenses.view.App",
+      "type": "XML",
+      "id": "appView",
+      "async": true
+    },
+    "resources": {
+      "css": [
+        { "uri": "css/style.css" }
+      ]
+    },
+    "routing": {
+      "config": {
+        "routerClass": "sap.m.routing.Router",
+        "viewType": "XML",
+        "viewPath": "my.expenses.view",
+        "controlId": "app",
+        "controlAggregation": "pages",
+        "async": true
+      },
+      "routes": [
+        { "pattern": "", "name": "log", "target": "log" },
+        { "pattern": "expenses", "name": "expenses", "target": "expenses" },
+        { "pattern": "reports", "name": "reports", "target": "reports" }
+      ],
+      "targets": {
+        "log": { "viewId": "log", "viewName": "Log" },
+        "expenses": { "viewId": "expenses", "viewName": "Expenses" },
+        "reports": { "viewId": "reports", "viewName": "Report" }
+      }
+    }
+  }
+}

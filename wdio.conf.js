@@ -16,7 +16,8 @@ exports.config = {
     ],
     logLevel: 'error',
     // Assumes `cds watch` is already serving on 4004.
-    baseUrl: 'http://localhost:4004',
+    // Mocked local auth. alice has no password in the CAP defaults.
+    baseUrl: 'http://alice:@localhost:4004',
     waitforTimeout: 30000,
     connectionRetryTimeout: 120000,
     connectionRetryCount: 3,

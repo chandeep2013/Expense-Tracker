@@ -2,6 +2,11 @@ node_modules/
 gen/
 *.db
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .env
 dist/
+_out/
+mta_archives/
+*.mtar
 test/e2e/__screenshots__/

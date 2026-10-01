@@ -1,13 +1,17 @@
 {
-  "name": "travel-expense",
+  "name": "myexpenses",
   "version": "1.0.0",
-  "description": "Travel expense claim capture and approval",
+  "description": "MyExpenses — personal expense tracker on SAP CAP",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@sap/cds": "^10",
+    "@cap-js/hana": "^3",
+    "@sap/hana-client": "^2",
+    "@sap/xssec": "^4",
+    "exceljs": "^4.4.0",
     "express": "^4"
   },
   "devDependencies": {
@@ -27,20 +31,40 @@
     "start": "cds-serve",
     "watch": "cds watch",
     "build": "cds build --production",
-    "test": "mocha test/*.test.js --timeout 60000",
+    "test": "NODE_ENV=test mocha test/service.test.js --timeout 60000 && NODE_ENV=test mocha test/myexpenses.test.js --timeout 60000",
     "test:e2e": "wdio run wdio.conf.js"
   },
   "cds": {
     "requires": {
-      "db": {
-        "kind": "sqlite",
-        "credentials": {
-          "url": ":memory:"
+      "[development]": {
+        "db": {
+          "kind": "sqlite",
+          "credentials": {
+            "url": "db/myexpenses.sqlite"
+          }
+        },
+        "auth": {
+          "kind": "mocked"
         }
       },
-      "[development]": {
+      "[test]": {
+        "db": {
+          "kind": "sqlite",
+          "credentials": {
+            "url": ":memory:"
+          }
+        },
         "auth": {
-          "kind": "dummy"
+          "kind": "mocked"
+        }
+      },
+      "[production]": {
+        "db": {
+          "kind": "hana",
+          "deploy-format": "hdbtable"
+        },
+        "auth": {
+          "kind": "xsuaa"
         }
       }
     }

@@ -1,55 +1,104 @@
-# Expense Tracker
+# MyExpenses
 
-SAP CAP + Fiori elements app for capturing travel expense claims with line
-items, cost centres, and approval status.
+Personal expense tracker on [SAP Cloud Application Programming Model](https://cap.cloud.sap/) (Node.js, `@sap/cds`). You log an expense, review your own list, and open a day, week, or month report with a category chart. The current report downloads as Excel.
 
-Built from the functional specification in [`specs/travel-expense.md`](specs/travel-expense.md).
+Amounts are Indian rupees. There is no receipt upload.
 
-## Run it
+## Defaults
 
-Requires Node.js 20+.
+These choices are intentional so the daily reminder, charts, and phone/laptop layout stay practical:
+
+| Choice | Value |
+| --- | --- |
+| Runtime | Node.js CAP (`@sap/cds` 10, Node.js 22+) |
+| UI | Freestyle SAPUI5 `sap.m` (Horizon), one responsive app |
+| Currency | INR |
+| Categories | Food/Snacks, Travel, Groceries, UPI |
+| Week | Monday–Sunday containing the selected date |
+| Local database | SQLite file `db/myexpenses.sqlite` |
+| Local auth | CAP mocked authentication (basic auth) |
+| Cloud database | SAP HANA via `@cap-js/hana` and an HDI container |
+| Cloud auth | XSUAA, entered through the approuter |
+
+The UI is not a separate mobile app. The same pages adapt: a side menu on a laptop, a bottom bar on a phone (including iPhone 13, about 390×844).
+
+## Run it locally
+
+Requires Node.js 22 or newer.
 
 ```bash
 npm install
-npm run watch
+npm start
 ```
 
-Open the Fiori launchpad at <http://localhost:4004/launchpad.html> and start
-**Manage Travel Expenses**.
+The first start creates `db/myexpenses.sqlite` and loads the schema. Later starts keep that file, so expenses stay on disk. Delete the file and start again to reset it. `npm run watch` does the same setup, then restarts when files change.
 
-Fiori elements uses launchpad (ushell) services for list-to-object navigation,
-so open the app from the launchpad rather than `index.html` directly.
+Open <http://localhost:4004/myexpenses/webapp/index.html>. The browser asks for a user. Sign in as `alice` with a blank password (any CAP mocked user works the same way; `bob` is a second user). Each user only sees and edits their own expenses.
 
-### Apps
+What you can do:
 
-- **Manage Travel Expenses** — list report and object page for expense claims
-  (standalone: <http://localhost:4004/expenseclaim/webapp/index.html>)
+- **Log expense** — date (defaults to today), category, amount in INR, short description.
+- **My expenses** — list, filter, edit, and delete your expenses.
+- **Reports** — Day, Week, or Month, with a donut and bar chart by category.
+- **Download Excel** — workbook for the period currently on screen.
+- **Daily reminder** — if nothing is logged for today, a dialog asks you to add one. Dismiss hides it until you open a new browser session, and it comes back the next day.
 
-### Services
-
-- `TravelService` at `/odata/v4/travel/`
-  - `ExpenseClaims` — draft-enabled claims
-  - `ExpenseItems` — composition children of a claim
-  - `CostCentres` — read-only controlling master data
-
-### Entities
-
-- `CostCentres` — code, name, company code
-- `ExpenseClaims` — claim number (`EX-000001`), employee, trip, status, totals
-- `ExpenseItems` — position, category (Travel / Meal / Lodging / Other), amount
-
-New claims start as **Draft**. Status values: Draft, Submitted, Approved,
-Rejected, Paid. Cost centres cannot be created or changed from this service.
-
-Local development uses dummy authentication so the browser does not prompt for
-basic auth. Production keeps `requires: authenticated-user`.
+The OData service is `ExpenseService` at `/odata/v4/expenses/`. Excel download is `GET /api/expenses/report.xlsx?period=month&anchor=YYYY-MM-DD`.
 
 ## Tests
 
 ```bash
-npm test          # cds.test service tests, no browser needed
-npm run test:e2e  # wdi5 browser tests, requires `npm run watch` in another shell
+npm test
 ```
 
-OPA5 journeys live under `app/expenseclaim/webapp/test/integration/` and run
-via `app/expenseclaim/webapp/test/testsuite.qunit.html`.
+Covers category validation, authentication, per-user scoping, day/week/month totals, and the Excel workbook. Tests use an in-memory SQLite database and do not need a browser.
+
+```bash
+npm run test:e2e
+```
+
+Browser checks for the existing travel-claims UI. Start `npm start` first. Local auth is mocked, so that suite signs in as `alice`.
+
+## Deploy to SAP BTP, Cloud Foundry
+
+`mta.yaml` builds three modules: the CAP server, an HDI deployer for SAP HANA, and an approuter in front of XSUAA. You do not need BTP credentials to run or test this project locally.
+
+### Prerequisites this repository cannot create for you
+
+1. A BTP subaccount with Cloud Foundry enabled, and a target org and space.
+2. Entitlements: `hana` / `hdi-shared`, and `xsuaa` / `application`.
+3. A SAP HANA Cloud instance available to that space. If the space has more than one database, set `database_id` on the `myexpenses-db` resource in `mta.yaml`.
+4. Cloud Foundry CLI (`cf`) logged in (`cf login`), and the [Cloud MTA Build Tool](https://sap.github.io/cloud-mta-build-tool/) (`mbt`).
+5. A Node.js buildpack on the landscape that runs Node.js 22 (required by CAP 10).
+
+### Build and deploy
+
+```bash
+npm ci
+mbt build -t gen --mtar myexpenses.mtar
+cf deploy mta_archives/myexpenses.mtar
+```
+
+After deploy:
+
+1. Assign the `MyExpenses_User` role collection to yourself (Security → Role Collections in the BTP cockpit).
+2. Open the approuter URL from `cf apps`.
+3. Sign out later at `/logout` on that host.
+
+The approuter requires the `User` scope. The CAP service requires an authenticated user and only returns expenses stored for that user id. Production uses XSUAA JWT validation (`@sap/xssec`) and HANA (`@cap-js/hana`).
+
+UI5 is loaded in the browser from `https://ui5.sap.com`, so the person using the app needs access to that CDN.
+
+## Project layout
+
+- `db/myexpenses.cds` — expense entity
+- `srv/expense-service.cds` — authenticated service, report, and “logged today” check
+- `app/myexpenses/webapp` — freestyle SAPUI5 app
+- `app/router` — approuter for Cloud Foundry
+- `xs-security.json`, `mta.yaml` — XSUAA and MTA deploy descriptors
+
+## Existing travel expense claims app
+
+This repository also contains the earlier travel-claims service (`TravelService` at `/odata/v4/travel/`) and its Fiori elements UI. It is unchanged in behavior aside from local authentication, which is now the CAP mocked strategy used by MyExpenses.
+
+Open it at <http://localhost:4004/launchpad.html> and sign in as `alice` with a blank password. The standalone UI is <http://localhost:4004/expenseclaim/webapp/index.html>.

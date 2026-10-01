@@ -1,0 +1,73 @@
+_schema-version: "3.1"
+ID: myexpenses
+version: 1.0.0
+description: MyExpenses personal expense tracker
+parameters:
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production
+
+modules:
+  - name: myexpenses-srv
+    type: nodejs
+    path: gen/srv
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 512M
+      disk-quota: 1024M
+    properties:
+      NODE_ENV: production
+    build-parameters:
+      builder: npm
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+    requires:
+      - name: myexpenses-auth
+      - name: myexpenses-db
+
+  - name: myexpenses-db-deployer
+    type: hdb
+    path: gen/db
+    parameters:
+      buildpack: nodejs_buildpack
+    requires:
+      - name: myexpenses-db
+
+  - name: myexpenses-approuter
+    type: approuter.nodejs
+    path: app/router
+    parameters:
+      disk-quota: 256M
+      memory: 256M
+      keep-existing-routes: true
+    requires:
+      - name: srv-api
+        group: destinations
+        properties:
+          forwardAuthToken: true
+          name: srv-api
+          url: ~{srv-url}
+          timeout: 600000
+      - name: myexpenses-auth
+
+resources:
+  - name: myexpenses-db
+    type: com.sap.xs.hdi-container
+    parameters:
+      service: hana
+      service-plan: hdi-shared
+  - name: myexpenses-auth
+    type: org.clouud.xs.uaa
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: xs-security.json
+      config:
+        xsappname: myexpenses-${org}-${space}
+        tenant-mode: dedicated

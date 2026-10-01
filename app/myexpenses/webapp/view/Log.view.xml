@@ -1,0 +1,63 @@
+<mvc:View
+  controllerName="my.expenses.controller.Log"
+  xmlns:mvc="sap.ui.core.mvc"
+  xmlns="sap.m"
+  xmlns:core="sap.ui.core">
+  <Page id="logPage" title="Log an expense" backgroundDesign="Solid">
+    <content>
+      <VBox class="pageContent">
+        <Text class="intro" text="Add what you spent today. Amounts are in Indian rupees, and you do not need a receipt."/>
+        <VBox class="card">
+          <Label text="Date" required="true" class="field"/>
+          <DatePicker
+            id="date"
+            width="100%"
+            valueFormat="yyyy-MM-dd"
+            displayFormat="d MMM y"
+            class="field"
+            change=".onDateChange"/>
+          <Label text="Category" required="true"/>
+          <HBox wrap="Wrap" class="catGrid">
+            <Button id="catFood" text="Food/Snacks" press=".onCategory" class="catTile catFood">
+              <customData>
+                <core:CustomData key="category" value="Food/Snacks"/>
+              </customData>
+            </Button>
+            <Button id="catTravel" text="Travel" press=".onCategory" class="catTile catTravel">
+              <customData>
+                <core:CustomData key="category" value="Travel"/>
+              </customData>
+            </Button>
+            <Button id="catGroceries" text="Groceries" press=".onCategory" class="catTile catGroceries">
+              <customData>
+                <core:CustomData key="category" value="Groceries"/>
+              </customData>
+            </Button>
+            <Button id="catUpi" text="UPI" press=".onCategory" class="catTile catUpi">
+              <customData>
+                <core:CustomData key="category" value="UPI"/>
+              </customData>
+            </Button>
+          </HBox>
+          <Label text="Amount" required="true" class="field"/>
+          <Input
+            id="amount"
+            width="100%"
+            placeholder="0.00"
+            description="INR"
+            class="field"/>
+          <Label text="Description" class="field"/>
+          <TextArea
+            id="description"
+            width="100%"
+            rows="3"
+            maxLength="120"
+            placeholder="Short note, optional"
+            class="field"/>
+          <MessageStrip id="formMessage" visible="false" showIcon="true" class="field"/>
+          <Button id="save" text="Save expense" type="Emphasized" width="100%" press=".onSave"/>
+        </VBox>
+      </VBox>
+    </content>
+  </Page>
+</mvc:View>

@@ -24,7 +24,8 @@ describe('Manage Travel Expenses', () => {
 
     it('serves data over OData', async () => {
         const response = await fetch(
-            `${browser.options.baseUrl}/odata/v4/travel/ExpenseClaims`
+            `${browser.options.baseUrl}/odata/v4/travel/ExpenseClaims`,
+            { headers: { Authorization: 'Basic ' + Buffer.from('alice:').toString('base64') } }
         );
         expect(response.status).toBe(200);
         const body = await response.json();

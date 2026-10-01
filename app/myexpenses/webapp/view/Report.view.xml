@@ -1,0 +1,71 @@
+<mvc:View
+  controllerName="my.expenses.controller.Report"
+  xmlns:mvc="sap.ui.core.mvc"
+  xmlns="sap.m"
+  xmlns:core="sap.ui.core"
+  xmlns:l="sap.ui.layout">
+  <Page id="reportPage" title="Reports" backgroundDesign="Solid">
+    <content>
+      <VBox class="pageContent">
+        <Text class="intro" text="Switch between a day, a Monday–Sunday week, or a calendar month. The chart splits the total by category."/>
+        <VBox class="card">
+          <SegmentedButton id="period" selectedKey="month" selectionChange=".onPeriod" width="100%">
+            <items>
+              <SegmentedButtonItem key="day" text="Day"/>
+              <SegmentedButtonItem key="week" text="Week"/>
+              <SegmentedButtonItem key="month" text="Month"/>
+            </items>
+          </SegmentedButton>
+          <DatePicker
+            id="anchor"
+            width="100%"
+            valueFormat="yyyy-MM-dd"
+            displayFormat="d MMM y"
+            change=".onAnchor"
+            class="sapUiSmallMarginTop"/>
+          <Text id="range" text="{report>/rangeText}" class="muted sapUiSmallMarginTop"/>
+          <Text id="total" text="{report>/totalText}" class="heroTotal"/>
+          <Text text="{report>/countText}" class="muted"/>
+          <Button
+            id="download"
+            text="Download Excel"
+            icon="sap-icon://excel-attachment"
+            type="Emphasized"
+            press=".onDownload"
+            class="sapUiSmallMarginTop"/>
+        </VBox>
+        <MessageStrip
+          id="empty"
+          text="No expenses in this period."
+          type="Information"
+          showIcon="true"
+          visible="{report>/empty}"
+          class="sapUiSmallMarginBottom"/>
+        <l:Grid containerQuery="true" defaultSpan="XL6 L6 M12 S12" vSpacing="1" hSpacing="1">
+          <VBox class="card">
+            <Title text="By category" level="H2" class="sapUiTinyMarginBottom"/>
+            <FlexBox wrap="Wrap" alignItems="Center" class="chartLayout">
+              <core:HTML id="donut" sanitizeContent="false" preferDOM="false"/>
+              <VBox id="bars" class="bars"/>
+            </FlexBox>
+          </VBox>
+          <VBox class="card">
+            <Title text="Breakdown" level="H2" class="sapUiTinyMarginBottom"/>
+            <Table items="{report>/slices}" noDataText="No categories">
+              <columns>
+                <Column><Text text="Category"/></Column>
+                <Column hAlign="End" width="5rem"><Text text="Count"/></Column>
+                <Column hAlign="End"><Text text="Amount"/></Column>
+              </columns>
+              <ColumnListItem>
+                <Text text="{report>category}"/>
+                <Text text="{report>count}"/>
+                <Text text="{report>totalText}" class="amount"/>
+              </ColumnListItem>
+            </Table>
+          </VBox>
+        </l:Grid>
+      </VBox>
+    </content>
+  </Page>
+</mvc:View>
