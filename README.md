@@ -35,7 +35,7 @@ The first start creates `db/myexpenses.sqlite` and loads the schema. Later start
 
 Open <http://localhost:4004/myexpenses/webapp/index.html>. In SAP Business Application Studio, use that same path on the host `npm start` or `cds watch` exposes: `/myexpenses/webapp/index.html`.
 
-`/`, `/index.html`, `/launchpad.html`, and the old travel preview (`/expenseclaim/webapp/index.html`, `/expenseclaim/webapp/test/flpSandbox.html`) redirect there. Those files also bootstrap MyExpenses themselves, so a Fiori tools preview that ignores the server still does not load the launchpad.
+`/`, `/index.html`, and `/launchpad.html` serve this same freestyle app.
 
 The browser asks for a user. Sign in as `alice` with a blank password (any CAP mocked user works the same way; `bob` is a second user). Each user only sees and edits their own expenses.
 
@@ -101,8 +101,6 @@ UI5 is loaded in the browser from `https://ui5.sap.com`, so the person using the
 - `app/router` — approuter for Cloud Foundry
 - `xs-security.json`, `mta.yaml` — XSUAA and MTA deploy descriptors
 
-## Existing travel expense claims app
+## Travel claims service
 
-This repository also contains the earlier travel-claims service (`TravelService` at `/odata/v4/travel/`). Local authentication for that service is the CAP mocked strategy used by MyExpenses.
-
-The old Fiori launchpad is not a start page. `app/expenseclaim/webapp/index.html` and `app/appconfig/fioriSandboxConfig.json` used to boot UI5 1.120.0 with `sap.ushell` and `sap.fe`, which the public CDN does not serve. Opening those URLs now starts MyExpenses.
+`TravelService` remains at `/odata/v4/travel/` because the service tests use it. It has no UI. The only app is MyExpenses.

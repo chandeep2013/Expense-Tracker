@@ -1,3 +1,5 @@
+const fs = require('node:fs')
+const path = require('node:path')
 const cds = require('@sap/cds')
 const { fetchReport, HttpError } = require('./srv/lib/report-data')
 const { workbookBuffer } = require('./srv/lib/excel')
@@ -11,22 +13,24 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 const MYEXPENSES = '/myexpenses/webapp/index.html'
-
-// These are the pages BAS and Fiori tools open. Registered before express.static.
-const START_PAGES = [
-  '/',
-  '/index.html',
-  '/launchpad.html',
-  '/expenseclaim/webapp/index.html',
-  '/expenseclaim/webapp/test/flp.html',
-  '/expenseclaim/webapp/test/flpSandbox.html',
-  '/expenseclaim/webapp/test/flpSandboxMockServer.html'
-]
+const MYEXPENSES_HTML = fs.readFileSync(path.join(__dirname, 'app/myexpenses/webapp/index.html'))
 
 cds.on('bootstrap', (app) => {
-  app.get(START_PAGES, (_req, res) => {
+  const sendApp = (_req, res) => {
     res.set('Cache-Control', 'no-store')
-    res.redirect(302, MYEXPENSES)
+    res.type('html').send(MYEXPENSES_HTML)
+  }
+  // Same document as the freestyle app, including when BAS opens / or launchpad.html.
+  app.get(['/', '/index.html', '/launchpad.html', MYEXPENSES], sendApp)
+  // The travel Fiori app is gone. Do not serve a cached Component.js from that path.
+  app.use('/expenseclaim', (req, res) => {
+    res.set('Cache-Control', 'no-store')
+    const target = req.path || '/'
+    if (target === '/' || target.endsWith('/') || target.endsWith('.html')) {
+      res.redirect(302, MYEXPENSES)
+      return
+    }
+    res.status(404).type('text/plain').send('Not found')
   })
 })
 

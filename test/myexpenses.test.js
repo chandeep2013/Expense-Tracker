@@ -226,49 +226,57 @@ describe('MyExpenses', () => {
       expect(value(no.data)).to.equal(false)
     })
 
-    it('opens MyExpenses from every BAS start page', async () => {
-      const home = '/myexpenses/webapp/index.html'
-      const starts = [
-        '/',
-        '/index.html',
-        '/launchpad.html',
-        '/expenseclaim/webapp/index.html',
-        '/expenseclaim/webapp/test/flp.html',
-        '/expenseclaim/webapp/test/flpSandbox.html',
-        '/expenseclaim/webapp/test/flpSandboxMockServer.html'
-      ]
+    it('serves MyExpenses at the BAS start pages', async () => {
+      const starts = ['/', '/index.html', '/launchpad.html', '/myexpenses/webapp/index.html']
       for (const start of starts) {
         const response = await GET(start, { maxRedirects: 0, validateStatus: () => true })
-        expect(response.status, start).to.equal(302)
-        expect(response.headers.location, start).to.equal(home)
-        const followed = await GET(start)
-        expect(followed.status, start).to.equal(200)
-        expect(followed.data, start).to.include('my.expenses')
-        expect(followed.data, start).to.include('1.136.0')
-        expect(followed.data, start).to.not.match(/sap\.ushell/)
-        expect(followed.data, start).to.not.match(/sap\.fe/)
-        expect(followed.data, start).to.not.include('1.120.0')
+        expect(response.status, start).to.equal(200)
+        expect(response.data, start).to.include('1.136.0')
+        expect(response.data, start).to.include('data-name="my.expenses"')
+        expect(response.data, start).to.include('sap.m,sap.tnt,sap.ui.layout')
+        expect(response.data, start).to.not.include('1.120.0')
+        expect(response.data, start).to.not.match(/sap\.fe/)
+        expect(response.data, start).to.not.match(/sap\.ushell/)
+      }
+      for (const gone of [
+        '/expenseclaim/webapp/Component.js',
+        '/expenseclaim/webapp/Component-preload.js',
+        '/expenseclaim/webapp/manifest.json'
+      ]) {
+        const missing = await GET(gone, { maxRedirects: 0, validateStatus: () => true })
+        expect(missing.status, gone).to.equal(404)
+        expect(String(missing.data), gone).to.not.match(/sap\.fe/)
       }
     })
 
     it('has no HTML entry that boots sap.ushell or UI5 1.120.0', () => {
-      const root = path.join(__dirname, '..', 'app')
+      const root = path.join(__dirname, '..')
+      const skip = new Set(['node_modules', 'gen', 'test', '.git'])
       const files = []
       const walk = (dir) => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (skip.has(entry.name)) continue
           const full = path.join(dir, entry.name)
           if (entry.isDirectory()) walk(full)
-          else if (entry.name.endsWith('.html')) files.push(full)
+          else if (/\.(html|js|json|yaml|yml|cds|xml)$/.test(entry.name) || entry.name === 'package.json') {
+            files.push(full)
+          }
         }
       }
       walk(root)
-      expect(files.length).to.be.greaterThan(0)
+      const htmlFiles = files.filter((file) => file.endsWith('.html'))
+      expect(htmlFiles.length).to.be.greaterThan(0)
       for (const file of files) {
-        const html = fs.readFileSync(file, 'utf8')
+        const text = fs.readFileSync(file, 'utf8')
         const label = path.relative(root, file)
-        expect(html, label).to.not.match(/sap\.ushell/)
-        expect(html, label).to.not.match(/sap\.fe/)
-        expect(html, label).to.not.include('1.120.0')
+        expect(text, label).to.not.include('1.120')
+        expect(text, label).to.not.match(/sap\.fe\.templates/)
+        expect(text, label).to.not.match(/sap\.ushell/)
+        expect(text, label).to.not.match(/sap\/fe\//)
+        if (file.endsWith('.html')) {
+          const names = [...text.matchAll(/data-name="([^"]+)"/g)].map((match) => match[1])
+          expect(names, label).to.deep.equal(names.length ? ['my.expenses'] : [])
+        }
       }
     })
 
