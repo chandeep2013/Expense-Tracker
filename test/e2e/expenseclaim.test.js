@@ -1,28 +1,14 @@
-const { wdi5 } = require('wdio-ui5-service');
-
-describe('Manage Travel Expenses', () => {
+describe('MyExpenses', () => {
     before(async () => {
-        await browser.goTo('/expenseclaim/webapp/index.html');
+        await browser.goTo('/myexpenses/webapp/index.html');
     });
 
-    it('bootstraps the Fiori elements app', async () => {
+    it('bootstraps the freestyle app', async () => {
         const title = await browser.getTitle();
-        expect(title).toContain('Manage Travel Expenses');
+        expect(title).toContain('MyExpenses');
     });
 
-    it('renders the list report table', async () => {
-        const table = await browser.asControl({
-            selector: {
-                controlType: 'sap.ui.mdc.Table',
-                viewName: 'sap.fe.templates.ListReport.ListReport',
-                id: { id: 'ExpenseClaimsList' },
-                searchOpenDialogs: false
-            }
-        });
-        expect(await table.isInitialized()).toBeTruthy();
-    });
-
-    it('serves data over OData', async () => {
+    it('serves travel claims over OData', async () => {
         const response = await fetch(
             `${browser.options.baseUrl}/odata/v4/travel/ExpenseClaims`,
             { headers: { Authorization: 'Basic ' + Buffer.from('alice:').toString('base64') } }

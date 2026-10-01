@@ -12,13 +12,22 @@ if (process.env.NODE_ENV !== 'production') {
 
 const MYEXPENSES = '/myexpenses/webapp/index.html'
 
+// These are the pages BAS and Fiori tools open. Registered before express.static.
+const START_PAGES = [
+  '/',
+  '/index.html',
+  '/launchpad.html',
+  '/expenseclaim/webapp/index.html',
+  '/expenseclaim/webapp/test/flp.html',
+  '/expenseclaim/webapp/test/flpSandbox.html',
+  '/expenseclaim/webapp/test/flpSandboxMockServer.html'
+]
+
 cds.on('bootstrap', (app) => {
-  // Registered before express.static, so these win over app/launchpad.html and app/index.html.
-  // The public UI5 CDN does not serve sap.ushell, and launchpad.html is what BAS opens by default.
-  const openMyExpenses = (_req, res) => {
+  app.get(START_PAGES, (_req, res) => {
+    res.set('Cache-Control', 'no-store')
     res.redirect(302, MYEXPENSES)
-  }
-  app.get(['/', '/index.html', '/launchpad.html'], openMyExpenses)
+  })
 })
 
 cds.on('served', () => {

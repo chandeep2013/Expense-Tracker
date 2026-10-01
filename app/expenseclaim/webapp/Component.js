@@ -1,9 +1,9 @@
 sap.ui.define(
-    ["sap/fe/core/AppComponent"],
-    function (AppComponent) {
+    ["sap/ui/core/UIComponent"],
+    function (UIComponent) {
         "use strict";
 
-        return AppComponent.extend("expenseclaim.Component", {
+        return UIComponent.extend("expenseclaim.Component", {
             metadata: {
                 manifest: "json"
             }

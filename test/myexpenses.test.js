@@ -1,4 +1,6 @@
 process.env.NODE_ENV = 'test'
+const fs = require('node:fs')
+const path = require('node:path')
 const cds = require('@sap/cds')
 const ExcelJS = require('exceljs')
 const { expect, GET, POST, PATCH, DELETE } = cds.test(__dirname + '/..')
@@ -224,19 +226,50 @@ describe('MyExpenses', () => {
       expect(value(no.data)).to.equal(false)
     })
 
-    it('opens MyExpenses from the server root and the old launchpad URL', async () => {
+    it('opens MyExpenses from every BAS start page', async () => {
       const home = '/myexpenses/webapp/index.html'
-      for (const path of ['/', '/index.html', '/launchpad.html']) {
-        const response = await GET(path, { maxRedirects: 0, validateStatus: () => true })
-        expect(response.status, path).to.equal(302)
-        expect(response.headers.location, path).to.equal(home)
+      const starts = [
+        '/',
+        '/index.html',
+        '/launchpad.html',
+        '/expenseclaim/webapp/index.html',
+        '/expenseclaim/webapp/test/flp.html',
+        '/expenseclaim/webapp/test/flpSandbox.html',
+        '/expenseclaim/webapp/test/flpSandboxMockServer.html'
+      ]
+      for (const start of starts) {
+        const response = await GET(start, { maxRedirects: 0, validateStatus: () => true })
+        expect(response.status, start).to.equal(302)
+        expect(response.headers.location, start).to.equal(home)
+        const followed = await GET(start)
+        expect(followed.status, start).to.equal(200)
+        expect(followed.data, start).to.include('my.expenses')
+        expect(followed.data, start).to.include('1.136.0')
+        expect(followed.data, start).to.not.match(/sap\.ushell/)
+        expect(followed.data, start).to.not.match(/sap\.fe/)
+        expect(followed.data, start).to.not.include('1.120.0')
       }
-      const page = await GET(home)
-      expect(page.status).to.equal(200)
-      expect(page.data).to.include('my.expenses')
-      expect(page.data).to.include('sap.m,sap.tnt,sap.ui.layout')
-      expect(page.data).to.not.include('sap.ushell')
-      expect(page.data).to.not.include('sap.fe')
+    })
+
+    it('has no HTML entry that boots sap.ushell or UI5 1.120.0', () => {
+      const root = path.join(__dirname, '..', 'app')
+      const files = []
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name)
+          if (entry.isDirectory()) walk(full)
+          else if (entry.name.endsWith('.html')) files.push(full)
+        }
+      }
+      walk(root)
+      expect(files.length).to.be.greaterThan(0)
+      for (const file of files) {
+        const html = fs.readFileSync(file, 'utf8')
+        const label = path.relative(root, file)
+        expect(html, label).to.not.match(/sap\.ushell/)
+        expect(html, label).to.not.match(/sap\.fe/)
+        expect(html, label).to.not.include('1.120.0')
+      }
     })
 
     it('downloads the current report as an Excel workbook', async () => {

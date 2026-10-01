@@ -2,14 +2,31 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>MyExpenses</title>
-  <meta http-equiv="refresh" content="0; url=/myexpenses/webapp/index.html">
-  <script>
-    window.location.replace('/myexpenses/webapp/index.html')
+  <style>
+    html, body { height: 100%; margin: 0; }
+  </style>
+  <script
+    id="sap-ui-bootstrap"
+    src="https://ui5.sap.com/1.136.0/resources/sap-ui-core.js"
+    data-sap-ui-theme="sap_horizon"
+    data-sap-ui-libs="sap.m,sap.tnt,sap.ui.layout"
+    data-sap-ui-compat-version="edge"
+    data-sap-ui-async="true"
+    data-sap-ui-xx-waitForTheme="true"
+    data-sap-ui-resourceroots='{"my.expenses":"/myexpenses/webapp/"}'
+    data-sap-ui-on-init="module:sap/ui/core/ComponentSupport">
   </script>
 </head>
-<body>
-  <p><a href="/myexpenses/webapp/index.html">Open MyExpenses</a></p>
+<body class="sapUiBody">
+  <div
+    data-sap-ui-component
+    data-name="my.expenses"
+    data-id="container"
+    data-settings='{"id":"myexpenses"}'
+    data-height="100%">
+  </div>
 </body>
 </html>

@@ -1,12 +1,13 @@
 specVersion: "3.1"
 metadata:
-  name: expenseclaim
+  name: myexpenses
 type: application
 framework:
   name: SAPUI5
-  version: "1.120.0"
+  version: "1.136.0"
   libraries:
     - name: sap.m
+    - name: sap.tnt
     - name: sap.ui.core
-    - name: sap.fe.templates
+    - name: sap.ui.layout
     - name: themelib_sap_horizon

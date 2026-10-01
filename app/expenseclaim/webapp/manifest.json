@@ -18,20 +18,6 @@
           "odataVersion": "4.0"
         }
       }
-    },
-    "crossNavigation": {
-      "inbounds": {
-        "expenseclaim-inbound": {
-          "semanticObject": "ExpenseClaims",
-          "action": "manage",
-          "title": "{{appTitle}}",
-          "info": "{{appDescription}}",
-          "signature": {
-            "parameters": {},
-            "additionalParameters": "allowed"
-          }
-        }
-      }
     }
   },
   "sap.ui": {
@@ -46,11 +32,10 @@
   "sap.ui5": {
     "flexEnabled": false,
     "dependencies": {
-      "minUI5Version": "1.120.0",
+      "minUI5Version": "1.136.0",
       "libs": {
         "sap.m": {},
-        "sap.ui.core": {},
-        "sap.fe.templates": {}
+        "sap.ui.core": {}
       }
     },
     "models": {
@@ -73,60 +58,9 @@
     "resources": {
       "css": []
     },
-    "routing": {
-      "config": {},
-      "routes": [
-        {
-          "pattern": ":?query:",
-          "name": "ExpenseClaimsList",
-          "target": "ExpenseClaimsList"
-        },
-        {
-          "pattern": "ExpenseClaims({key}):?query:",
-          "name": "ExpenseClaimsObjectPage",
-          "target": "ExpenseClaimsObjectPage"
-        }
-      ],
-      "targets": {
-        "ExpenseClaimsList": {
-          "type": "Component",
-          "id": "ExpenseClaimsList",
-          "name": "sap.fe.templates.ListReport",
-          "options": {
-            "settings": {
-              "entitySet": "ExpenseClaims",
-              "variantManagement": "None",
-              "initialLoad": "Enabled",
-              "navigation": {
-                "ExpenseClaims": {
-                  "detail": {
-                    "route": "ExpenseClaimsObjectPage"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "ExpenseClaimsObjectPage": {
-          "type": "Component",
-          "id": "ExpenseClaimsObjectPage",
-          "name": "sap.fe.templates.ObjectPage",
-          "options": {
-            "settings": {
-              "entitySet": "ExpenseClaims",
-              "editableHeaderContent": false
-            }
-          }
-        }
-      }
-    },
     "contentDensities": {
       "compact": true,
       "cozy": true
     }
-  },
-  "sap.fiori": {
-    "registrationIds": [],
-    "archeType": "transactional"
   }
 }
