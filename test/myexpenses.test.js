@@ -224,6 +224,21 @@ describe('MyExpenses', () => {
       expect(value(no.data)).to.equal(false)
     })
 
+    it('opens MyExpenses from the server root and the old launchpad URL', async () => {
+      const home = '/myexpenses/webapp/index.html'
+      for (const path of ['/', '/index.html', '/launchpad.html']) {
+        const response = await GET(path, { maxRedirects: 0, validateStatus: () => true })
+        expect(response.status, path).to.equal(302)
+        expect(response.headers.location, path).to.equal(home)
+      }
+      const page = await GET(home)
+      expect(page.status).to.equal(200)
+      expect(page.data).to.include('my.expenses')
+      expect(page.data).to.include('sap.m,sap.tnt,sap.ui.layout')
+      expect(page.data).to.not.include('sap.ushell')
+      expect(page.data).to.not.include('sap.fe')
+    })
+
     it('downloads the current report as an Excel workbook', async () => {
       const response = await GET('/api/expenses/report.xlsx?period=month&anchor=2026-10-01', {
         ...alice,

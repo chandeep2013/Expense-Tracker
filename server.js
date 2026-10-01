@@ -10,10 +10,15 @@ if (process.env.NODE_ENV !== 'production') {
   }
 }
 
+const MYEXPENSES = '/myexpenses/webapp/index.html'
+
 cds.on('bootstrap', (app) => {
-  app.get('/', (_req, res) => {
-    res.redirect(302, '/myexpenses/webapp/index.html')
-  })
+  // Registered before express.static, so these win over app/launchpad.html and app/index.html.
+  // The public UI5 CDN does not serve sap.ushell, and launchpad.html is what BAS opens by default.
+  const openMyExpenses = (_req, res) => {
+    res.redirect(302, MYEXPENSES)
+  }
+  app.get(['/', '/index.html', '/launchpad.html'], openMyExpenses)
 })
 
 cds.on('served', () => {

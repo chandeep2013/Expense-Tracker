@@ -33,7 +33,9 @@ npm start
 
 The first start creates `db/myexpenses.sqlite` and loads the schema. Later starts keep that file, so expenses stay on disk. Delete the file and start again to reset it. `npm run watch` does the same setup, then restarts when files change.
 
-Open <http://localhost:4004/myexpenses/webapp/index.html>. The browser asks for a user. Sign in as `alice` with a blank password (any CAP mocked user works the same way; `bob` is a second user). Each user only sees and edits their own expenses.
+Open <http://localhost:4004/myexpenses/webapp/index.html>. In SAP Business Application Studio, use that same path on the host `npm start` exposes: `/myexpenses/webapp/index.html`. The server root (`/`), `/index.html`, and `/launchpad.html` redirect there. `/launchpad.html` is not a Fiori launchpad: the public UI5 CDN does not serve `sap.ushell`, so that older sandbox page cannot start.
+
+The browser asks for a user. Sign in as `alice` with a blank password (any CAP mocked user works the same way; `bob` is a second user). Each user only sees and edits their own expenses.
 
 What you can do:
 
@@ -99,6 +101,6 @@ UI5 is loaded in the browser from `https://ui5.sap.com`, so the person using the
 
 ## Existing travel expense claims app
 
-This repository also contains the earlier travel-claims service (`TravelService` at `/odata/v4/travel/`) and its Fiori elements UI. It is unchanged in behavior aside from local authentication, which is now the CAP mocked strategy used by MyExpenses.
+This repository also contains the earlier travel-claims service (`TravelService` at `/odata/v4/travel/`) and its Fiori elements UI. Local authentication for that service is the CAP mocked strategy used by MyExpenses.
 
-Open it at <http://localhost:4004/launchpad.html> and sign in as `alice` with a blank password. The standalone UI is <http://localhost:4004/expenseclaim/webapp/index.html>.
+`npm start` does not open that UI. `/launchpad.html` redirects to MyExpenses. The travel launchpad loaded `sap.ushell` and `sap.fe` from UI5 1.120.0, and the public CDN does not serve those libraries.
